@@ -1,1 +1,7 @@
-train_data
+train_data/
+__pycache__/
+*.pyc
+checkpoints/
+result/
+tmp_*
+*.log
