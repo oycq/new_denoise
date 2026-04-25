@@ -90,11 +90,39 @@ def unpack_rggb(packed: np.ndarray) -> np.ndarray:
 def gray_world_gains(bgr_linear: np.ndarray) -> tuple[float, float, float]:
     """Compute per-channel multiplicative gains so that all channel means equal G.
 
-    Operates in *linear* (pre-gamma) BGR domain.
+    Operates in *linear* (pre-gamma) BGR domain. Input may be any float scale
+    (the gains are scale-invariant).
     """
     means = bgr_linear.reshape(-1, 3).mean(axis=0).astype(np.float64) + 1e-6
     g = means[1]
     return float(g / means[0]), 1.0, float(g / means[2])  # gains for B, G, R
+
+
+def raw_to_linear_bgr(
+    raw: np.ndarray, *, black_level_8bit: float = BLACK_LEVEL_8BIT
+) -> np.ndarray:
+    """Black-level subtract + 16-bit demosaic, return ``float32`` linear BGR in
+    the 0-255 domain (i.e. the same numeric range the user spec calls for).
+
+    No 8-bit quantisation is performed inside this pipeline - demosaic runs
+    on full 16-bit precision so that smooth raw gradients survive intact.
+    The returned array is the natural input for white balance and gamma.
+    """
+    if raw.ndim != 2:
+        raise ValueError(f"Expected (H, W) Bayer, got {raw.shape}")
+
+    arr = raw.astype(np.float32, copy=False)
+    if arr.max() <= 1.5:  # normalized [0,1] input
+        arr = arr * RAW_MAX
+
+    # Subtract the black level in 16-bit domain (BL_16 = BL_8 * 256), clip,
+    # then round-to-nearest into uint16 for the OpenCV Bayer kernel.
+    bl_16 = float(black_level_8bit) * 256.0
+    arr16 = np.clip(arr - bl_16, 0.0, RAW_MAX)
+    arr16_u = (arr16 + 0.5).astype(np.uint16)
+
+    bgr_u16 = cv2.cvtColor(arr16_u, cv2.COLOR_BayerRG2BGR)  # 16-bit demosaic
+    return bgr_u16.astype(np.float32) / 256.0  # 0-255 linear float, full 16-bit precision
 
 
 def raw_to_display(
@@ -108,9 +136,17 @@ def raw_to_display(
 ) -> np.ndarray:
     """Run the full display pipeline on an RGGB Bayer raw.
 
-    Pipeline: ``raw_uint16 / 256`` -> subtract 8-bit black level -> demosaic ->
-    white balance (gray-world unless ``wb_gains`` is given, optional) ->
-    gamma 2.2.
+    Pipeline:
+
+    1. Subtract black level in **16-bit** domain (``BL_16 = BL_8 * 256``).
+    2. Demosaic at **16-bit precision** (no intermediate uint8 cast).
+    3. Convert to ``float32`` linear BGR scaled to the 0-255 domain.
+    4. White balance (gray-world unless ``wb_gains`` is given) - in linear float.
+    5. Gamma 2.2 - in float on [0, 1].
+    6. **Single** quantisation: ``round * 255 -> uint8`` only at the very end.
+
+    This avoids the staircase artifact that ``/256`` + ``astype(uint8)``
+    before demosaic introduced previously.
 
     Parameters
     ----------
@@ -130,29 +166,18 @@ def raw_to_display(
     -------
     img : ``uint8`` ``(H, W, 3)``
     """
-    if raw.ndim != 2:
-        raise ValueError(f"Expected (H, W) Bayer, got {raw.shape}")
-
-    arr = raw.astype(np.float32, copy=False)
-    if arr.max() <= 1.5:  # normalized [0,1] input
-        arr = arr * RAW_MAX
-
-    img8 = arr / 256.0  # 0-255 domain
-    img8 = img8 - black_level_8bit
-    img8 = np.clip(img8, 0.0, 255.0).astype(np.uint8)
-
-    bgr = cv2.cvtColor(img8, cv2.COLOR_BayerRG2BGR)  # RGGB pattern
-    bgr_f = bgr.astype(np.float32)
+    bgr_f = raw_to_linear_bgr(raw, black_level_8bit=black_level_8bit)
 
     if apply_white_balance:
         gb, gg, gr = wb_gains if wb_gains is not None else gray_world_gains(bgr_f)
+        bgr_f = bgr_f.copy()
         bgr_f[..., 0] *= gb
         bgr_f[..., 1] *= gg
         bgr_f[..., 2] *= gr
 
-    bgr_f = np.clip(bgr_f / 255.0, 0.0, 1.0)
-    bgr_f = np.power(bgr_f, 1.0 / gamma)
-    out = (bgr_f * 255.0 + 0.5).clip(0, 255).astype(np.uint8)
+    bgr_norm = np.clip(bgr_f / 255.0, 0.0, 1.0)
+    bgr_norm = np.power(bgr_norm, 1.0 / gamma)
+    out = (bgr_norm * 255.0 + 0.5).clip(0, 255).astype(np.uint8)
     if return_rgb:
         out = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
     return out

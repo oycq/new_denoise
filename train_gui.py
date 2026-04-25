@@ -33,7 +33,13 @@ from matplotlib.figure import Figure
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from n2n.infer import run_inference_set
-from n2n.raw_utils import gray_world_gains, packed_to_display, unpack_rggb, raw_to_display
+from n2n.raw_utils import (
+    gray_world_gains,
+    packed_to_display,
+    raw_to_display,
+    raw_to_linear_bgr,
+    unpack_rggb,
+)
 from n2n.trainer import PreviewInfo, StepInfo, TrainConfig, Trainer
 
 PREVIEW_MIN = 256  # smallest side of the preview label, in pixels
@@ -253,12 +259,10 @@ class PreviewPanel(QtWidgets.QWidget):
 
     def update_preview(self, info: PreviewInfo):
         # Share WB gains between noisy & denoised so the colour balance is
-        # identical and the only visible difference is noise level.
+        # identical and the only visible difference is noise level. WB
+        # gains are computed in 16-bit linear domain (no uint8 quantisation).
         bayer_den = unpack_rggb(info.denoised_packed)
-        img8 = (bayer_den * 255.0 - 9.0).clip(0, 255).astype("uint8")
-        import cv2 as _cv
-        bgr_lin = _cv.cvtColor(img8, _cv.COLOR_BayerRG2BGR).astype("float32")
-        gains = gray_world_gains(bgr_lin)
+        gains = gray_world_gains(raw_to_linear_bgr(bayer_den))
 
         noisy = raw_to_display(
             unpack_rggb(info.noisy_packed), wb_gains=gains, return_rgb=True

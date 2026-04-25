@@ -25,6 +25,7 @@ from .raw_utils import (
     gray_world_gains,
     pack_rggb,
     raw_to_display,
+    raw_to_linear_bgr,
     read_isp,
     read_raw,
     unpack_rggb,
@@ -119,14 +120,10 @@ def make_comparison_panel(
     """Return a single BGR uint8 image with three labelled panels.
 
     The noisy and denoised panels share the white-balance gains (computed
-    from the *denoised* image, which is more representative of the scene
-    statistics) so the comparison is colour-consistent.
+    on the 16-bit demosaiced *denoised* image, whose stats are less noisy)
+    so the comparison is colour-consistent.
     """
-    # Compute shared WB gains from a quick pass on the denoised image: do the
-    # /256, -BL, demosaic ourselves to extract a linear BGR for gain estimation.
-    img8 = (denoised_uint16.astype(np.float32) / 256.0 - 9.0).clip(0, 255).astype(np.uint8)
-    bgr_lin = cv2.cvtColor(img8, cv2.COLOR_BayerRG2BGR).astype(np.float32)
-    shared_gains = gray_world_gains(bgr_lin)
+    shared_gains = gray_world_gains(raw_to_linear_bgr(denoised_uint16))
 
     noisy_disp = raw_to_display(raw_uint16, wb_gains=shared_gains)
     denoised_disp = raw_to_display(denoised_uint16, wb_gains=shared_gains)
@@ -176,11 +173,10 @@ def run_inference_set(
         isp_path = Path(str(f).replace("_raw.png", "_isp.png"))
         isp = read_isp(isp_path) if isp_path.exists() else None
 
-        # Shared WB gains computed from the denoised image (less noisy stats),
-        # so noisy & denoised ISP renders are colour-aligned.
-        img8 = (denoised.astype(np.float32) / 256.0 - 9.0).clip(0, 255).astype(np.uint8)
-        bgr_lin = cv2.cvtColor(img8, cv2.COLOR_BayerRG2BGR).astype(np.float32)
-        shared_gains = gray_world_gains(bgr_lin)
+        # Shared WB gains computed on the 16-bit demosaiced denoised image
+        # (no uint8 quantisation in the gain pipeline) so noisy & denoised
+        # ISP renders are colour-aligned and free of staircase artifacts.
+        shared_gains = gray_world_gains(raw_to_linear_bgr(denoised))
 
         isp_no_dn = raw_to_display(raw, wb_gains=shared_gains)
         isp_dn = raw_to_display(denoised, wb_gains=shared_gains)
