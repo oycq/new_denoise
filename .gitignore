@@ -1,21 +1,43 @@
-train_data/
+﻿# ---------------------------------------------------------------------------
+# Build / runtime artefacts -------------------------------------------------
+# ---------------------------------------------------------------------------
+
 __pycache__/
 *.pyc
-checkpoints/
-result/
-tmp_*
 *.log
 
-# Experiment artifacts (only `docs/` is tracked - it contains the
-# distilled knowledge HTML reports + their referenced images).
+# ---------------------------------------------------------------------------
+# Data, weights, results (large, regenerable, never committed) -------------
+# ---------------------------------------------------------------------------
+
+train_data/
+checkpoints/
+result/
+
+# ---------------------------------------------------------------------------
+# Past experiment artefacts -------------------------------------------------
+# ---------------------------------------------------------------------------
+# `experiments/` contains the historical sweep outputs (model.pt + ISP
+# renders + per-strategy summary.json) from the work documented in
+# `docs/EXPERIMENTS_JOURNEY.md`. The distilled knowledge (reports, comparison
+# images) lives under `docs/` and is tracked; the raw experiment data is
+# kept locally for reference but not pushed.
 experiments/
 
-# Standalone experiment scripts. Kept locally for reference / re-runs
-# but not part of the production codebase. The journey is documented
-# in `docs/EXPERIMENTS_JOURNEY.md`.
-run_experiments.py
-evaluate_experiments.py
-multi_scene_infer.py
-generate_20rois.py
-experiments_*.log
-multi_scene_infer.log
+# Local-only scripts kept for reproducing past experiments. They live under
+# `archive/` so the project root stays focused on production code (n2n/,
+# benchmark.py, run_train.py, train_gui.py).
+archive/
+
+# Distribution archives produced by `git archive ...` for handing off the
+# repo to other machines.
+*.zip
+*.tar.gz
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

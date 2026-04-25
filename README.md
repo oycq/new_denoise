@@ -115,10 +115,11 @@ checkpoints/n2n_model_600s.pt     # 10 min 快照
 ├── n2n/                         # 生产代码
 │   ├── raw_utils.py             # 16-bit 显示流水线、I/O、Bayer pack
 │   ├── n2n_sampler.py           # 矢量化 N2N 子采样
-│   ├── dataset.py               # patch + flip/transpose 增强
+│   ├── dataset.py               # CPU DataLoader fallback (patch + flip 增强)
+│   ├── gpu_dataset.py           # GPU-resident 数据集（默认）
 │   ├── model.py                 # 可配置深度 UNet (residual head)
 │   ├── losses.py                # 8 个 loss（默认 l1_plus_tv lam=0.03）
-│   ├── trainer.py               # FP16 训练循环 + 中间 ckpt
+│   ├── trainer.py               # 训练循环 + 中间 ckpt + 设备自动检测
 │   └── infer.py                 # tile 推理 + ImageJ-stack 输出
 ├── train_gui.py                 # PyQt5 GUI
 ├── run_train.py                 # 一键启动 GUI
@@ -134,9 +135,19 @@ checkpoints/n2n_model_600s.pt     # 10 min 快照
 ├── requirements.txt
 ├── README.md                    # （本文件）
 ├── QUICKSTART.md                # 部署到新机器的步骤
-├── train_data/                  # 训练数据（自备，gitignore）
-├── checkpoints/                 # 训练好的 .pt（自动建，gitignore）
-└── result/                      # 推理对比图（自动建，gitignore）
+│
+│   # ↓ 以下都不被 git 跟踪，本地保留
+├── train_data/                  # 训练数据（自备）
+├── checkpoints/                 # 训练好的 .pt（自动建）
+├── result/                      # 推理对比图（自动建）
+├── experiments/                 # 历史扫描的 ckpt + isp 渲染（不再积累，仅保留旧的）
+└── archive/                     # 旧扫描脚本（带 sys.path bootstrap）
+    ├── README.md
+    └── scripts/
+        ├── run_experiments.py
+        ├── evaluate_experiments.py
+        ├── multi_scene_infer.py
+        └── generate_20rois.py
 ```
 
 ## 6. 资源占用参考（RTX 2070 + FP16）

@@ -259,22 +259,20 @@ experiments/                 # 23 个候选的 checkpoint + isp 渲染
   log.txt                    # 每次扫描的训练日志
   REPORT.md                  # 阶段 3 结论的 markdown 版
 
-# 顶层测试脚本
-run_experiments.py           # 16 策略扫描的入口
-evaluate_experiments.py      # blob/hf/edge/composite 计算 + ROI 抽样
-multi_scene_infer.py         # 7 场景 × N 模型推理（含 legacy state_dict 重映射）
-generate_20rois.py           # 20 ROI 对比 strip 生成
-
-experiments_*.log
-multi_scene_infer.log
+archive/                     # 旧扫描脚本（带 path bootstrap）
+  README.md
+  scripts/
+    run_experiments.py       # 16 + 7 策略扫描的入口
+    evaluate_experiments.py  # blob/hf/edge/composite 计算 + ROI 抽样
+    multi_scene_infer.py     # 7 场景 × N 模型推理（含 legacy state_dict 重映射）
+    generate_20rois.py       # 20 ROI 对比 strip 生成
 ```
 
-如果想再做一次扫描或追加新损失：
+如果想再做一次扫描或追加新损失（脚本已加 `sys.path` bootstrap，从项目根目录直接调）：
 
 ```powershell
-# 把 .gitignore 里被排除的脚本恢复运行（git 不会跟踪结果）
-python run_experiments.py --seconds 300 --only 00_baseline_l1
-python evaluate_experiments.py
+python archive/scripts/run_experiments.py --seconds 300 --only 00_baseline_l1
+python archive/scripts/evaluate_experiments.py
 ```
 
 `run_experiments.py` 的 `STRATEGIES` 列表有完整的 16 + 7 个候选定义可参考。
