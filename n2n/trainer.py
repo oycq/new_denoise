@@ -19,9 +19,10 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from .dataset import BayerN2NDataset, find_raw_files
+from .gpu_dataset import GPUDataset
 from .losses import get as get_loss
 from .model import UNet
-from .n2n_sampler import generate_mask_pair, generate_subimages
+from .n2n_sampler import generate_index_pair, split_subimages, subimage_by_idx
 from .raw_utils import RAW_MAX, pack_rggb, read_raw
 
 
@@ -43,7 +44,16 @@ class TrainConfig:
     unet_depth: int = 3
     lr: float = 2e-4
     samples_per_epoch: int = 1024
-    num_workers: int = 0          # Windows + small data: 0 is faster
+    # ``num_workers`` is the legacy CPU-DataLoader path. The default is now
+    # the GPU-resident dataset (see ``use_gpu_dataset``); ``num_workers``
+    # is only consulted when that fallback is selected.
+    num_workers: int = 4
+    # GPU-resident dataset: load every packed RGGB frame onto the GPU at
+    # init and do random crop + per-item flip/transpose entirely on the
+    # GPU. Removes the CPU H2D copy + DataLoader bottleneck. ~780 MB of
+    # extra GPU memory for the full 140-frame training set, which still
+    # comfortably fits an 8 GB card.
+    use_gpu_dataset: bool = True
     use_fp16: bool = True
     n2n_lambda: float = 0.0       # N2N consistency reg (paper Eq.4); 0 = pure L1+TV main
     preview_size: int = 64        # patch size in packed-pixel units
@@ -60,6 +70,13 @@ class TrainConfig:
     # ``_<seconds>s`` suffix, so a single 20-min run yields multiple
     # comparable checkpoints (e.g. 2/5/10/20 min).
     intermediate_save_seconds: tuple = (120.0, 300.0, 600.0)
+    # GradScaler does an inf/nan check + host-side skip decision on every
+    # step, which silently inserts a CUDA sync. Our loss is L1 + lam*TV in
+    # the [0, 1] image domain so gradients stay well within fp16 dynamic
+    # range; disabling the scaler keeps fp16 forward/backward via autocast
+    # but removes the per-step sync. Revert to True if you ever change the
+    # loss family / scale.
+    use_grad_scaler: bool = False
 
 
 @dataclass
@@ -106,11 +123,24 @@ class Trainer:
         self.state = TrainState()
 
     # -- helpers -----------------------------------------------------------
-    def _build(self) -> tuple[UNet, torch.optim.Optimizer, DataLoader, torch.Tensor]:
+    def _build(
+        self,
+    ) -> tuple[UNet, torch.optim.Optimizer, "object", torch.Tensor]:
+        """Build model + optimizer + data source + preview tensor.
+
+        ``data source`` is either a ``GPUDataset`` (default) or a CPU
+        ``DataLoader`` (legacy fallback). The training loop disambiguates.
+        """
         torch.manual_seed(self.cfg.seed)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if device.type == "cuda":
+            # cuDNN selects the fastest conv algorithm per input shape on the
+            # first step then reuses it. Big win for our fixed-shape pipeline.
             torch.backends.cudnn.benchmark = True
+            # Allow tf32 fast paths where the hardware supports them
+            # (Ampere+; no-op on Turing but cheap to enable).
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         files = find_raw_files(self.cfg.data_root)
         if not files:
@@ -118,25 +148,50 @@ class Trainer:
                 f"No *_raw.png found under {self.cfg.data_root}. "
                 "Check the data path."
             )
-        ds = BayerN2NDataset(
-            files,
-            patch_size=self.cfg.patch_size,
-            samples_per_epoch=self.cfg.samples_per_epoch,
-        )
-        loader = DataLoader(
-            ds,
-            batch_size=self.cfg.batch_size,
-            shuffle=True,
-            num_workers=self.cfg.num_workers,
-            pin_memory=(device.type == "cuda"),
-            drop_last=True,
-        )
+
+        if self.cfg.use_gpu_dataset and device.type == "cuda":
+            # Hand the dataset our preferred memory format so it can fuse
+            # the channels_last conversion into the final stack (saves one
+            # NCHW -> NHWC memcpy per step).
+            data_src = GPUDataset(
+                files, device=device, memory_format=torch.channels_last)
+            print(f"[trainer] GPUDataset: {len(data_src)} frames, "
+                  f"{data_src.memory_mb():.0f} MB on {device}")
+        else:
+            ds_cpu = BayerN2NDataset(
+                files,
+                patch_size=self.cfg.patch_size,
+                samples_per_epoch=self.cfg.samples_per_epoch,
+            )
+            loader_kwargs: dict = dict(
+                batch_size=self.cfg.batch_size,
+                shuffle=True,
+                num_workers=self.cfg.num_workers,
+                pin_memory=(device.type == "cuda"),
+                drop_last=True,
+            )
+            if self.cfg.num_workers > 0:
+                loader_kwargs["persistent_workers"] = True
+                loader_kwargs["prefetch_factor"] = 4
+            data_src = DataLoader(ds_cpu, **loader_kwargs)
 
         model = UNet(
             in_ch=4, out_ch=4,
             base=self.cfg.base_channels, depth=self.cfg.unet_depth,
         ).to(device)
-        opt = torch.optim.Adam(model.parameters(), lr=self.cfg.lr)
+        # NHWC ("channels-last") layout. cuDNN's fp16 conv kernels prefer
+        # this layout; with mixed precision it can give 1.1-1.3x on
+        # Turing+ GPUs at the cost of input batches needing the same
+        # memory layout (handled in the training loop).
+        if device.type == "cuda":
+            model = model.to(memory_format=torch.channels_last)
+        # `fused=True` runs Adam's elementwise update in a single CUDA
+        # kernel instead of dispatching ~5 ops per parameter tensor. With
+        # 28 conv weight + bias tensors that's a non-trivial saving.
+        adam_kwargs = dict(lr=self.cfg.lr)
+        if device.type == "cuda":
+            adam_kwargs["fused"] = True
+        opt = torch.optim.Adam(model.parameters(), **adam_kwargs)
 
         # The preview is the most informative when taken from the noisiest ISO:
         # we look for `<data_root>/<scene>/<preview_iso_dir>/sensorN_raw.png`.
@@ -152,7 +207,7 @@ class Trainer:
             .unsqueeze(0)
             .to(device)
         )
-        return model, opt, loader, preview_t
+        return model, opt, data_src, preview_t
 
     def _find_preview_file(self, files: list) -> Path:
         """Pick a stable preview file from the noisiest ISO subdirectory.
@@ -199,7 +254,10 @@ class Trainer:
         cfg = self.cfg
         model, opt, loader, preview_t = self._build()
         device = preview_t.device
-        scaler = GradScaler("cuda", enabled=cfg.use_fp16 and device.type == "cuda")
+        scaler = GradScaler(
+            "cuda",
+            enabled=(cfg.use_fp16 and cfg.use_grad_scaler and device.type == "cuda"),
+        )
         loss_base = get_loss(cfg.loss_name)
         if cfg.loss_kwargs:
             loss_kw = dict(cfg.loss_kwargs)
@@ -238,10 +296,22 @@ class Trainer:
         # Emit a starting preview (epoch 0, untrained)
         self._run_preview(model, preview_t, step=0, epoch=0)
 
+        # Two source modes:
+        #   - GPUDataset: we drive the loop ourselves, computing
+        #     ``steps_per_epoch`` from samples_per_epoch / batch_size.
+        #   - DataLoader: iterate over its batches per epoch as usual.
+        is_gpu_ds = isinstance(loader, GPUDataset)
+        steps_per_epoch = max(1, cfg.samples_per_epoch // cfg.batch_size)
+
         stop = False
         while not stop:
             epoch += 1
-            for batch in loader:
+            batch_iter = (
+                (loader.sample_batch(cfg.batch_size, cfg.patch_size)
+                 for _ in range(steps_per_epoch))
+                if is_gpu_ds else loader
+            )
+            for batch in batch_iter:
                 if self.is_cancelled():
                     stop = True
                     break
@@ -250,15 +320,22 @@ class Trainer:
                     stop = True
                     break
 
-                batch = batch.to(device, non_blocking=True)
+                if not is_gpu_ds:
+                    batch = batch.to(device, non_blocking=True)
+                    if device.type == "cuda":
+                        batch = batch.to(memory_format=torch.channels_last)
+                # GPUDataset already returns a channels_last batch on GPU.
                 if bl_norm > 0:
                     batch = batch - bl_norm
 
                 # Mask sampling does no benefit from autocast and only adds
                 # int<->half overhead; keep it in fp32 outside autocast.
-                mask1, mask2 = generate_mask_pair(batch)
-                g1 = generate_subimages(batch, mask1)
-                g2 = generate_subimages(batch, mask2)
+                # `idx1` / `idx2` are int64 per-cell indices (no boolean
+                # mask + argmax round-trip).
+                idx1, idx2 = generate_index_pair(batch)
+                # Build g1 and g2 from a single shared ``cells`` reshape -
+                # halves the per-step memcpy of the (N, C, H, W) batch.
+                g1, g2 = split_subimages(batch, idx1, idx2)
 
                 with autocast("cuda", enabled=cfg.use_fp16):
                     pred_noise_g1 = model(g1)
@@ -271,12 +348,12 @@ class Trainer:
                         with torch.no_grad():
                             full_noise = model(batch)
                             full_den = batch - full_noise
-                            full_g1 = generate_subimages(full_den, mask1)
-                            full_g2 = generate_subimages(full_den, mask2)
+                            full_g1 = subimage_by_idx(full_den, idx1)
+                            full_g2 = subimage_by_idx(full_den, idx2)
                         reg = F.l1_loss(den_g1 - g2, full_g1 - full_g2)
                         loss = main + cfg.n2n_lambda * reg
                     else:
-                        reg = torch.zeros((), device=device)
+                        reg = main.detach() * 0  # zero on the autocast device
                         loss = main
 
                 opt.zero_grad(set_to_none=True)

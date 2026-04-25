@@ -296,18 +296,38 @@ python evaluate_experiments.py
 ### 训练吞吐量备忘
 
 ```
-RTX 2070 + FP16 + cudnn benchmark
+RTX 2070 (Turing, 8 GB) + FP16 autocast (no GradScaler)
++ channels_last + fused Adam + GPU-resident dataset + cudnn benchmark
 patch=256 (packed) + batch=6 + UNet depth=3 base=48
-~36.4 step/s
-samples_per_epoch=1024 -> 170 step / epoch -> ~4.7 s / epoch
 
-时长       epoch    step       loss
- 2 min       26     4 400      0.0186
- 5 min       65    11 050      0.0179
-10 min      130    22 100      0.0173
-20 min      258    43 793      0.0166
+~55.8 step/s (3-min sustained on RTX 2070)
+samples_per_epoch=1024 -> 170 step / epoch -> ~3.0 s / epoch
+
+时长（基于第一版 ~36 sps 的训练）        实际 epoch 后    实际 loss
+ 2 min                        26      0.0186
+ 5 min                        65      0.0179
+10 min                        130     0.0173
+20 min                        258     0.0166
 ```
 
-如果换更小的 batch 或更大的 patch，先用 `python -c "from n2n.trainer
-import Trainer, TrainConfig; Trainer(TrainConfig(train_seconds=60)).run()"`
-跑一分钟看实际 sps，再据此估算所需训练时长。
+如果换更小的 batch 或更大的 patch，先用 `python benchmark.py` 跑 3 min 看
+实际 sps，再据此估算所需训练时长。
+
+### 性能优化大事记
+
+性能从原始 ~34 sps 提升到 ~56 sps（+64%），关键步骤：
+
+| 优化 | sps Δ | 说明 |
+|---|---|---|
+| 矢量化 N2N sampler（去掉 bool→argmax round-trip） | +25% | `generate_index_pair` / `subimage_by_idx` 直接返回 idx |
+| `channels_last` 内存布局 | +21% | cuDNN 的 fp16 conv kernel 在 NHWC 下更快 |
+| GPU-resident 数据集（`GPUDataset`） | +6% | 整个数据集 ~780 MB 常驻 GPU，crop+aug 在 GPU 上做 |
+| fused Adam (`fused=True`) | +4% | 优化器更新合并到一个 CUDA kernel |
+| 融合 channels_last 到 sample_batch | +4% | 省一次 NCHW→NHWC memcpy/step |
+| 去掉 GradScaler 同步 (`use_grad_scaler=False`) | +4% | L1+TV loss 数值稳定，不需要 loss scaling，省一次 host 同步 |
+| `cudnn.benchmark = True` | (already) | 自动 conv 算法选择 |
+| `tf32` 开关 | (no-op) | RTX 2070 是 Turing，没 TF32；Ampere+ 上有 |
+
+**`torch.compile` / **`bf16`** 在 Windows + Turing 上不可用**（前者缺 Triton，后者无 tensor core）。
+4090 用户报告 `torch.compile` + `whole-step compile` 给了 +44% + +25%；如果迁
+移到 Linux + Ampere/Ada，可以再叠加 ~2× 速度。
