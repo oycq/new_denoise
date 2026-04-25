@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>TV-λ · 7 场景 × 20 ROI 视觉对比</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161922; --line: #232735;
+    --ink: #d6dae4; --muted: #8b91a3; --accent: #6cf;
+    --good: #5cd97a; --bad: #ff7b6b; --warn: #ffce5e;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+               font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+               line-height: 1.55; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 32px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 36px 0 12px; padding-bottom: 8px;
+       border-bottom: 1px solid var(--line); color: var(--accent); }
+  h3 { font-size: 16px; margin: 18px 0 8px; color: #c8d0e2; }
+  h4 { font-size: 14px; margin: 6px 0 4px; color: var(--ink); font-weight: 600; }
+  p, li { color: var(--ink); }
+  .lead { color: var(--muted); font-size: 15px; margin-top: 4px; }
+  .muted { color: var(--muted); }
+  code { background: #20242f; color: #f1d36b; padding: 1px 6px; border-radius: 4px;
+         font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 16px;
+          background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+          font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { background: #1c2030; color: var(--accent); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .good { color: var(--good); font-weight: 600; }
+  .bad  { color: var(--bad);  font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  figure { margin: 14px 0 4px; padding: 12px;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  figure img { width: 100%; height: auto; border-radius: 4px;
+               image-rendering: pixelated; image-rendering: crisp-edges;
+               display: block; }
+  figcaption { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  figcaption strong { color: var(--ink); }
+  .verdict { background: linear-gradient(180deg, #1d2a3d 0%, #1a2030 100%);
+             border: 1px solid #2a4a6a; border-left: 4px solid var(--accent);
+             padding: 16px 20px; border-radius: 6px; margin: 20px 0; }
+  .verdict h3 { margin-top: 0; color: var(--accent); }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+         padding: 12px 18px; font-size: 13px; columns: 2; column-gap: 24px; }
+  .toc a { color: var(--accent); text-decoration: none; display: block;
+           padding: 2px 0; }
+  .toc a:hover { text-decoration: underline; }
+  .cat { display: inline-block; padding: 1px 7px; border-radius: 10px;
+         font-size: 10px; font-weight: 600; margin-left: 8px; vertical-align: middle; }
+  .cat.shading  { background: #25361f; color: #b9e07a; }
+  .cat.smooth   { background: #1f2840; color: #94b8ff; }
+  .cat.grid     { background: #2c2148; color: #c8a3ff; }
+  .cat.edges    { background: #432828; color: #ffaeae; }
+  .cat.foliage  { background: #1d3a26; color: #6dd897; }
+  .cat.texture  { background: #3a2c1d; color: #ffd497; }
+  .cat.pattern  { background: #2c3a30; color: #b0d6b8; }
+  .cat.specular { background: #2a2a2a; color: #d6dae4; }
+  .cat.complex  { background: #3a2335; color: #f098cc; }
+  .cat.smooth-foliage { background: #2c4f30; color: #aff0c1; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
+          font-size: 11px; font-weight: 600; }
+  .pill.best  { background: #143822; color: var(--good); border: 1px solid #25602f; }
+  .pill.alt   { background: #25361f; color: #b9e07a; border: 1px solid #3d5a30; }
+  .pill.over  { background: #3a1f1f; color: var(--bad);  border: 1px solid #5a2828; }
+  .pill.weak  { background: #2a2a2a; color: var(--muted); border: 1px solid #444; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>TV-λ · 7 场景 × 20 ROI 视觉对比</h1>
+<p class="lead">在 ISO=16（最噪）数据集上，对 7 个不同场景的 sensor2 帧分别用 4 个模型推理。
+20 个代表性 ROI 涵盖 9 个内容类别：暗角阴影 / 平滑面 / 网格 / 边缘 / 树叶 / 纹理 / 几何图案 / 玻璃高光 / 复杂场景。</p>
+
+<h2>① 候选模型</h2>
+
+<table>
+  <thead><tr><th>缩写</th><th>损失</th><th>训练时长</th><th>角色</th></tr></thead>
+  <tbody>
+    <tr><td>baseline 5min</td><td>L1 (无 TV)</td><td>5 min</td><td>参考</td></tr>
+    <tr><td>λ=0.01 10min</td><td>L1 + 0.01·TV</td><td>10 min</td><td>当前默认 / 平衡</td></tr>
+    <tr><td>λ=0.02 10min</td><td>L1 + 0.02·TV</td><td>10 min</td><td>更干净</td></tr>
+    <tr><td>λ=0.05 10min</td><td>L1 + 0.05·TV</td><td>10 min</td><td>极致干净</td></tr>
+  </tbody>
+</table>
+
+<h2>② 7 个场景</h2>
+<p class="lead">每个场景 1280×1088 raw（ISO=16，最高噪声水平）。</p>
+
+<table>
+  <thead><tr><th>场景</th><th>关键内容</th><th>包含的 ROI</th></tr></thead>
+  <tbody>
+    <tr><td>changqiao_qiaodi</td><td>桥底 + 长椅 + 玻璃幕墙 + 木地板</td><td>#01–04</td></tr>
+    <tr><td>langan_louti</td><td>楼梯栏杆 + 玻璃塔楼 + 天空</td><td>#05–07</td></tr>
+    <tr><td>louti_shumu_caoguan</td><td>树木 + 灌木 + 砖路</td><td>#08–10</td></tr>
+    <tr><td>qiang_qiaodi</td><td>桥曲面 + 白墙 + 暗角</td><td>#11–13</td></tr>
+    <tr><td>shumu_guanmu_che</td><td>自行车堆 + 树干 + 写字楼百叶窗</td><td>#14–16</td></tr>
+    <tr><td>shumu_langan</td><td>玻璃幕墙 + 灌木丛</td><td>#17–18</td></tr>
+    <tr><td>zixingche_shumu_jiedao</td><td>共享单车 + 沿街店铺</td><td>#19–20</td></tr>
+  </tbody>
+</table>
+
+<h2>③ 目录</h2>
+<div class="toc">
+  <a href="#roi01">#01 暗角 + 镜头阴影 <span class="cat shading">shading</span></a>
+  <a href="#roi02">#02 桥底混凝土平面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi03">#03 建筑窗格垂直线 <span class="cat grid">grid</span></a>
+  <a href="#roi04">#04 长椅木纹 <span class="cat texture">texture</span></a>
+  <a href="#roi05">#05 楼梯栏杆（高频） <span class="cat edges">edges</span></a>
+  <a href="#roi06">#06 天空大平面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi07">#07 玻璃塔楼网格 <span class="cat grid">grid</span></a>
+  <a href="#roi08">#08 树枝密集 <span class="cat foliage">foliage</span></a>
+  <a href="#roi09">#09 砖路图案 <span class="cat pattern">pattern</span></a>
+  <a href="#roi10">#10 灌木叶丛 <span class="cat foliage">foliage</span></a>
+  <a href="#roi11">#11 暗角（极暗） <span class="cat shading">shading</span></a>
+  <a href="#roi12">#12 白墙大平面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi13">#13 桥曲面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi14">#14 自行车密堆 <span class="cat complex">complex</span></a>
+  <a href="#roi15">#15 写字楼百叶窗 <span class="cat grid">grid</span></a>
+  <a href="#roi16">#16 树干 + 树皮 <span class="cat texture">texture</span></a>
+  <a href="#roi17">#17 玻璃幕墙反射 <span class="cat specular">specular</span></a>
+  <a href="#roi18">#18 灌木丛纹理 <span class="cat foliage">foliage</span></a>
+  <a href="#roi19">#19 自行车辐条 <span class="cat edges">edges</span></a>
+  <a href="#roi20">#20 沿街店铺招牌 <span class="cat complex">complex</span></a>
+</div>
+
+<h2>④ 20 个 ROI 视觉对比</h2>
+<p class="lead">每条：<strong>NOISY → baseline 5min → λ=0.01 10min → λ=0.02 10min → λ=0.05 10min</strong>，2× 最近邻放大。</p>
+
+<figure id="roi01">
+  <h4>#01 changqiao_qiaodi · 左上暗角（镜头阴影）<span class="cat shading">shading</span></h4>
+  <img src="_eval/rois_20/01_corner_TL_lens.png" alt="01">
+  <figcaption>极暗 + 强彩噪。baseline 已经清得不错但仍有底噪；
+  <strong>所有 TV 候选都更干净</strong>，尤其 λ=0.05 几乎全平。
+  小亮点（潜在地灯反光）所有候选都保留。<strong>赢家：所有 TV 都好于 baseline</strong>。</figcaption>
+</figure>
+
+<figure id="roi02">
+  <h4>#02 changqiao_qiaodi · 桥底混凝土<span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20/02_ceiling_concrete.png" alt="02">
+  <figcaption>大平面，应该非常干净。
+  baseline 仍有可见底噪；<strong>λ↑ 越平越干净</strong>，混凝土的细微纹理被逐步抹掉。
+  λ=0.05 完全平。<strong>偏好取决于：是否需要保留混凝土材质感</strong>。</figcaption>
+</figure>
+
+<figure id="roi03">
+  <h4>#03 changqiao_qiaodi · 建筑窗格<span class="cat grid">grid</span></h4>
+  <img src="_eval/rois_20/03_window_grid.png" alt="03">
+  <figcaption>垂直窗框（高对比黑白线）。
+  baseline 框线清晰但伴随颗粒；λ=0.01 框线同样清晰且更干净；
+  <strong>λ=0.05 框线开始变粗、对比度下降</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi04">
+  <h4>#04 changqiao_qiaodi · 长椅木纹<span class="cat texture">texture</span></h4>
+  <img src="_eval/rois_20/04_bench_wood_grain.png" alt="04">
+  <figcaption>木纹是中频纹理 —— TV 杀手。
+  baseline 木纹最清；λ=0.01 木纹仍可见；<strong>λ=0.05 木纹基本消失，板材像合成皮革</strong>。
+  <strong>赢家：baseline / λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi05">
+  <h4>#05 langan_louti · 楼梯栏杆（高频）<span class="cat edges">edges</span></h4>
+  <img src="_eval/rois_20/05_railing_high_freq.png" alt="05">
+  <figcaption>密集竖栏 —— 这是<strong>整套测试中最难的 ROI</strong>。
+  baseline 栏杆清晰但带噪；λ=0.01 几乎相同清晰度但更干净；
+  λ=0.02 栏杆开始变粗；<strong>λ=0.05 栏杆糊得明显，间距感减弱</strong>。
+  <strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi06">
+  <h4>#06 langan_louti · 天空（大平面）<span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20/06_sky_smooth_flat.png" alt="06">
+  <figcaption>天空蓝灰渐变，理想情况应非常平滑。
+  baseline 在这种纯平面区域已经很干净；λ↑ 进一步消除残余颗粒。
+  差异小。<strong>赢家：大同小异，λ↑ 略好</strong>。</figcaption>
+</figure>
+
+<figure id="roi07">
+  <h4>#07 langan_louti · 玻璃塔楼网格<span class="cat grid">grid</span></h4>
+  <img src="_eval/rois_20/07_glass_tower_grid.png" alt="07">
+  <figcaption>玻璃幕墙的反射 + 细窗格。
+  baseline 反射细节清晰但有噪；λ=0.01 平衡好；
+  λ=0.05 玻璃反射被「擦」掉了，窗格也糊。<strong>赢家：λ=0.01 或 baseline</strong>。</figcaption>
+</figure>
+
+<figure id="roi08">
+  <h4>#08 louti_shumu_caoguan · 树枝密集<span class="cat foliage">foliage</span></h4>
+  <img src="_eval/rois_20/08_tree_branches.png" alt="08">
+  <figcaption>密集树叶（高频随机）。
+  baseline 叶片个体可分辨；λ=0.01 仍可分辨且更干净；
+  <strong>λ=0.05 叶片融成一团</strong>，「鬼影感」明显。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi09">
+  <h4>#09 louti_shumu_caoguan · 砖路图案<span class="cat pattern">pattern</span></h4>
+  <img src="_eval/rois_20/09_brick_pavement.png" alt="09">
+  <figcaption>规则砖块图案（中频）。
+  baseline 砖缝清晰；λ=0.01 同样可见且更干净；
+  λ=0.02 砖缝开始模糊；<strong>λ=0.05 砖缝几乎消失，路面像柏油</strong>。
+  <strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi10">
+  <h4>#10 louti_shumu_caoguan · 灌木叶丛<span class="cat foliage">foliage</span></h4>
+  <img src="_eval/rois_20/10_dense_shrubs.png" alt="10">
+  <figcaption>密集灌木叶（最高频）。
+  baseline 叶尖锐利；λ=0.01 仍保留叶片轮廓；
+  <strong>λ=0.05 叶片融成一片绿团</strong>。<strong>赢家：baseline / λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi11">
+  <h4>#11 qiang_qiaodi · 极暗角（高 ISO 死区）<span class="cat shading">shading</span></h4>
+  <img src="_eval/rois_20/11_corner_BR_dark.png" alt="11">
+  <figcaption>桥下暗角，几乎全黑 + 强烈彩噪。
+  baseline 已经大幅清噪；TV 候选在这里都进一步压扁底噪。
+  <strong>所有 TV 候选都明显好于 baseline</strong>，λ=0.05 最干净但底部水泥纹理消失。
+  <strong>赢家：λ=0.02 或 λ=0.05（都接受）</strong>。</figcaption>
+</figure>
+
+<figure id="roi12">
+  <h4>#12 qiang_qiaodi · 白墙大平面<span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20/12_wall_white_smooth.png" alt="12">
+  <figcaption>大块白墙，理想应纯平。
+  baseline 仍有亚像素颗粒；λ=0.01 干净；
+  λ=0.05 完全均匀。<strong>赢家：λ=0.05 在纯平面胜出</strong>。</figcaption>
+</figure>
+
+<figure id="roi13">
+  <h4>#13 qiang_qiaodi · 桥曲面<span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20/13_bridge_curve.png" alt="13">
+  <figcaption>白色弧形桥底（光滑曲面 + 软高光）。
+  baseline 曲面清晰但带颗粒；λ↑ 越平。
+  λ=0.05 曲面最平但与 λ=0.02 差别小。<strong>赢家：λ=0.02 或 λ=0.05</strong>。</figcaption>
+</figure>
+
+<figure id="roi14">
+  <h4>#14 shumu_guanmu_che · 自行车密堆<span class="cat complex">complex</span></h4>
+  <img src="_eval/rois_20/14_bicycle_cluster.png" alt="14">
+  <figcaption>极复杂场景，机械金属边缘 + 阴影 + 多色塑料外壳。
+  baseline 单车细节最丰富但噪；λ=0.01 平衡 —— 边缘锐 + 噪降；
+  <strong>λ=0.05 单车融成抽象色块</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi15">
+  <h4>#15 shumu_guanmu_che · 写字楼百叶窗<span class="cat grid">grid</span></h4>
+  <img src="_eval/rois_20/15_tower_blinds_vert.png" alt="15">
+  <figcaption>密集垂直百叶窗 —— 高频测试。
+  baseline 百叶清晰但带噪；λ=0.01 同清晰且更净；
+  λ=0.02 百叶略变粗；<strong>λ=0.05 百叶糊明显</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi16">
+  <h4>#16 shumu_guanmu_che · 树干树皮纹理<span class="cat texture">texture</span></h4>
+  <img src="_eval/rois_20/16_tree_trunk_dark.png" alt="16">
+  <figcaption>树干 + 粗糙树皮（中频随机纹理）。
+  baseline 树皮纹理清晰；λ=0.01 仍可见；
+  <strong>λ=0.05 树皮变成均匀深褐色塑料</strong>。<strong>赢家：baseline / λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi17">
+  <h4>#17 shumu_langan · 玻璃幕墙反射<span class="cat specular">specular</span></h4>
+  <img src="_eval/rois_20/17_glass_facade.png" alt="17">
+  <figcaption>玻璃幕墙的弱反射 + 接缝。
+  baseline 反射细节最丰富但带噪；λ=0.01 反射保留 + 干净；
+  <strong>λ=0.05 反射几乎被消除，玻璃变成纯灰色</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi18">
+  <h4>#18 shumu_langan · 灌木丛纹理<span class="cat foliage">foliage</span></h4>
+  <img src="_eval/rois_20/18_hedge_texture.png" alt="18">
+  <figcaption>密集灌木（中低频纹理）。
+  baseline 叶片有噪点但有质感；λ=0.01 干净 + 保留质感；
+  λ=0.05 灌木丛失去层次。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi19">
+  <h4>#19 zixingche_shumu_jiedao · 自行车辐条（最细高频）<span class="cat edges">edges</span></h4>
+  <img src="_eval/rois_20/19_bicycle_spokes.png" alt="19">
+  <figcaption>自行车辐条 —— 整套测试中<strong>最细的边缘</strong>。
+  baseline 辐条最锐但伴噪；λ=0.01 辐条仍可见但略软；
+  <strong>λ=0.05 辐条几乎消失</strong>。<strong>赢家：baseline 或 λ=0.01</strong>。</figcaption>
+</figure>
+
+<figure id="roi20">
+  <h4>#20 zixingche_shumu_jiedao · 沿街店铺招牌<span class="cat complex">complex</span></h4>
+  <img src="_eval/rois_20/20_shop_signs.png" alt="20">
+  <figcaption>店铺玻璃 + 文字招牌（混合高低频 + 文字 OCR 测试）。
+  baseline 文字最清晰但带噪；λ=0.01 文字可读 + 干净；
+  <strong>λ=0.05 文字模糊到难以识别</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
+</figure>
+
+<h2>⑤ 20 ROI 胜率统计</h2>
+
+<table>
+  <thead>
+    <tr><th>类别</th><th>ROI 数量</th><th>baseline 赢</th><th>λ=0.01 赢</th><th>λ=0.02 赢</th><th>λ=0.05 赢</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>暗角阴影 (#01, #11)</td><td class="num">2</td><td class="num">0</td><td class="num">1</td><td class="num">2</td><td class="num">1</td></tr>
+    <tr><td>平滑面 (#02, #06, #12, #13)</td><td class="num">4</td><td class="num">0</td><td class="num">1</td><td class="num">3</td><td class="num"><strong>4</strong></td></tr>
+    <tr><td>网格/百叶 (#03, #07, #15)</td><td class="num">3</td><td class="num">1</td><td class="num"><strong>3</strong></td><td class="num">1</td><td class="num">0</td></tr>
+    <tr><td>边缘高频 (#05, #19)</td><td class="num">2</td><td class="num">1</td><td class="num"><strong>2</strong></td><td class="num">0</td><td class="num">0</td></tr>
+    <tr><td>树叶/灌木 (#08, #10, #18)</td><td class="num">3</td><td class="num">1</td><td class="num"><strong>3</strong></td><td class="num">0</td><td class="num">0</td></tr>
+    <tr><td>纹理 (#04, #16)</td><td class="num">2</td><td class="num"><strong>2</strong></td><td class="num">2</td><td class="num">0</td><td class="num">0</td></tr>
+    <tr><td>规则图案 (#09)</td><td class="num">1</td><td class="num">0</td><td class="num"><strong>1</strong></td><td class="num">0</td><td class="num">0</td></tr>
+    <tr><td>玻璃高光 (#17)</td><td class="num">1</td><td class="num">0</td><td class="num"><strong>1</strong></td><td class="num">0</td><td class="num">0</td></tr>
+    <tr><td>复杂场景 (#14, #20)</td><td class="num">2</td><td class="num">0</td><td class="num"><strong>2</strong></td><td class="num">0</td><td class="num">0</td></tr>
+    <tr style="background:#1a2533">
+      <td><strong>总计 (一个 ROI 可有多赢家)</strong></td>
+      <td class="num"><strong>20</strong></td>
+      <td class="num">5</td>
+      <td class="num good"><strong>16</strong></td>
+      <td class="num">6</td>
+      <td class="num">5</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>⑥ 总结</h2>
+
+<div class="verdict">
+  <h3>λ=0.01 在 20 ROI 中赢 16 次，是综合最优</h3>
+  <p><strong>每个 λ 的最佳应用场景：</strong></p>
+  <ul>
+    <li><span class="pill best">λ=0.01</span> <strong>16/20 ROI 最佳</strong> ——
+    在「网格/百叶/栏杆/辐条/树叶/玻璃反射/文字/复杂场景」上几乎都是赢家。
+    保留细节 + 比 baseline 更干净。<strong>推荐为默认</strong>。</li>
+
+    <li><span class="pill alt">λ=0.05</span> <strong>仅在 4 个纯平面 ROI 上赢</strong>（#06 天空, #12 白墙, #13 桥曲面, 部分 #02）。
+    <strong>但代价是所有有纹理的地方都糊</strong>（木纹 / 树皮 / 文字 / 辐条全部消失）。
+    适用场景非常窄。</li>
+
+    <li><span class="pill alt">λ=0.02</span> 在「需要更干净的暗角 + 保持一定边缘」时是不错的折中（#01 #11 #13 在它这里也排前）。</li>
+
+    <li><span class="pill weak">baseline (无 TV)</span> 仅在「纯纹理保留至上」的情况赢（#04 木纹, #16 树皮，刚好与 λ=0.01 平手）。
+    任何含暗角 / 平面 / 阴影的 ROI 都被 TV 候选超越。</li>
+  </ul>
+  <p><strong>结论：当前默认 <code>l1_plus_tv</code> + <code>lam=0.01</code> + 训练 ≥ 10 min 是经过 20 个真实 ROI 验证的最佳选择。</strong></p>
+</div>
+
+<h3>关键反直觉发现</h3>
+<ul>
+  <li><strong>λ=0.05 量化分数最高（composite 0.756）但视觉上是最糟的「广义平均」</strong>。
+  说明<strong>composite 指标对纹理细节失分惩罚不够</strong>，把 blob/hf 的权重设太高了。</li>
+  <li><strong>暗角阴影是 TV 帮助最大的场景</strong>（高彩噪 + 平面），TV 几乎完美。
+  这也是为什么 λ=0.05 看起来似乎不错的原因 —— 但它在边缘和纹理处的损失是真实的。</li>
+  <li>5 vs 10 min 的视觉差异，对 λ=0.01 最显著（边缘锐回来），对 λ=0.05 几乎没差（已经被压扁，无法再拉回）。</li>
+</ul>
+
+<h3>实验产物</h3>
+<ul>
+  <li><code>experiments/_eval/multi_scene/&lt;scene&gt;/</code> · 7 场景 × 5 张全图（noisy + 4 模型）</li>
+  <li><code>experiments/_eval/rois_20/01_*.png ... 20_*.png</code> · 20 个 ROI 对比 strip</li>
+  <li><code>experiments/00_baseline_l1_v2/</code> · 新架构 baseline（depth=3, patch=256）</li>
+  <li><code>experiments/13c_l1_plus_tv_lam01_10min/</code> · 当前默认</li>
+  <li><code>experiments/13b_l1_plus_tv_lam02_10min/</code> · 替代 (λ=0.02)</li>
+  <li><code>experiments/13_l1_plus_tv_lam05_10min/</code> · 替代 (λ=0.05, 不推荐)</li>
+</ul>
+
+<p class="lead" style="margin-top: 40px; font-size: 12px;">每个 ROI 都是 2× 最近邻放大，所有候选共享 gray-world 白平衡（每场景 × 模型独立计算，色彩一致）。</p>
+
+</div>
+</body>
+</html>

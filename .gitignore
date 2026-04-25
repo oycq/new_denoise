@@ -5,5 +5,17 @@ checkpoints/
 result/
 tmp_*
 *.log
-experiments/*/model.pt
+
+# Experiment artifacts (only `docs/` is tracked - it contains the
+# distilled knowledge HTML reports + their referenced images).
+experiments/
+
+# Standalone experiment scripts. Kept locally for reference / re-runs
+# but not part of the production codebase. The journey is documented
+# in `docs/EXPERIMENTS_JOURNEY.md`.
+run_experiments.py
+evaluate_experiments.py
+multi_scene_infer.py
+generate_20rois.py
 experiments_*.log
+multi_scene_infer.log

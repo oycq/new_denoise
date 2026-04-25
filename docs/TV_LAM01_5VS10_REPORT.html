@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>λ=0.01 · 5min vs 10min 对比</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161922; --line: #232735;
+    --ink: #d6dae4; --muted: #8b91a3; --accent: #6cf;
+    --good: #5cd97a; --bad: #ff7b6b; --warn: #ffce5e; --neutral: #9ea4b6;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+               font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+               line-height: 1.6; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 36px 0 12px; padding-bottom: 8px;
+       border-bottom: 1px solid var(--line); color: var(--accent); }
+  h3 { font-size: 16px; margin: 18px 0 8px; color: #c8d0e2; }
+  .lead { color: var(--muted); font-size: 15px; margin-top: 4px; }
+  code { background: #20242f; color: #f1d36b; padding: 1px 6px; border-radius: 4px;
+         font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 16px;
+          background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: 14px; }
+  th { background: #1c2030; color: var(--accent); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .good { color: var(--good); font-weight: 600; }
+  .bad  { color: var(--bad);  font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  .neutral { color: var(--neutral); }
+  .row-hl td { background: #1a2533; }
+  figure { margin: 12px 0 24px; }
+  figure img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px;
+               image-rendering: pixelated; image-rendering: crisp-edges; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .verdict { background: linear-gradient(180deg, #1d2a3d 0%, #1a2030 100%);
+             border: 1px solid #2a4a6a; border-left: 4px solid var(--accent);
+             padding: 16px 20px; border-radius: 6px; margin: 20px 0; }
+  .verdict h3 { margin-top: 0; color: var(--accent); }
+  .delta-up   { color: var(--good); font-weight: 700; }
+  .delta-down { color: var(--bad);  font-weight: 700; }
+  .delta-flat { color: var(--neutral); }
+  .barwrap { display: flex; align-items: center; gap: 8px; }
+  .bar { height: 8px; border-radius: 4px; min-width: 4px; }
+  .bar-blob { background: var(--bad); }
+  .bar-edge { background: var(--good); }
+  .bar-comp { background: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>λ = 0.01 · 训练时长对比 (5 min vs 10 min)</h1>
+<p class="lead">同一配置：<code>l1_plus_tv</code> · <code>lam=0.01</code> · UNet depth=3 · patch=256 · batch=6。
+唯一区别是 wall-clock 训练时长 5 分钟 → 10 分钟。</p>
+
+<h2>① 量化指标</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>训练配置</th>
+      <th class="num">blob ↓</th>
+      <th class="num">hf_noise ↓</th>
+      <th class="num">edge ↑</th>
+      <th class="num">composite ↑</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>baseline (no TV, 5 min)</td>
+      <td class="num neutral">1.007</td>
+      <td class="num neutral">0.890</td>
+      <td class="num neutral">17.97</td>
+      <td class="num neutral">0.575</td>
+    </tr>
+    <tr>
+      <td>λ=0.01 · <strong>5 min</strong></td>
+      <td class="num good">0.981</td>
+      <td class="num neutral">0.891</td>
+      <td class="num warn">17.26</td>
+      <td class="num good">0.617</td>
+    </tr>
+    <tr class="row-hl">
+      <td><strong>λ=0.01 · 10 min</strong></td>
+      <td class="num good">0.982</td>
+      <td class="num good">0.880</td>
+      <td class="num good">18.07</td>
+      <td class="num good">0.671</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>10 min vs 5 min 的差值（核心结论）</h3>
+<table>
+  <thead>
+    <tr>
+      <th>指标</th>
+      <th class="num">5 min</th>
+      <th class="num">10 min</th>
+      <th class="num">Δ</th>
+      <th>解读</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>blob (大平面残留)</td>
+      <td class="num">0.981</td>
+      <td class="num">0.982</td>
+      <td class="num delta-flat">+0.1%</td>
+      <td>5 min 时角落已经收敛了，再训没必要</td>
+    </tr>
+    <tr>
+      <td>hf_noise (高频噪声底)</td>
+      <td class="num">0.891</td>
+      <td class="num">0.880</td>
+      <td class="num delta-up">−1.2%</td>
+      <td>残留细颗粒进一步消除</td>
+    </tr>
+    <tr class="row-hl">
+      <td><strong>edge (边缘锐度)</strong></td>
+      <td class="num">17.26</td>
+      <td class="num"><strong>18.07</strong></td>
+      <td class="num delta-up"><strong>+4.7%</strong></td>
+      <td><strong>关键：超过 baseline 17.97！</strong>TV 损失的细节被「学」回来了</td>
+    </tr>
+    <tr>
+      <td>composite</td>
+      <td class="num">0.617</td>
+      <td class="num">0.671</td>
+      <td class="num delta-up">+8.7%</td>
+      <td>综合得分明显上扬</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>条形图（值越长 / 越短越好）</h3>
+<table>
+  <thead><tr><th>指标</th><th>baseline</th><th>5 min</th><th>10 min</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>blob ↓</td>
+      <td><div class="barwrap"><div class="bar bar-blob" style="width:90%"></div><span class="num">1.007</span></div></td>
+      <td><div class="barwrap"><div class="bar bar-blob" style="width:88%"></div><span class="num">0.981</span></div></td>
+      <td><div class="barwrap"><div class="bar bar-blob" style="width:88%"></div><span class="num">0.982</span></div></td>
+    </tr>
+    <tr>
+      <td>edge ↑</td>
+      <td><div class="barwrap"><div class="bar bar-edge" style="width:90%"></div><span class="num">17.97</span></div></td>
+      <td><div class="barwrap"><div class="bar bar-edge" style="width:86%"></div><span class="num">17.26</span></div></td>
+      <td><div class="barwrap"><div class="bar bar-edge" style="width:90%"></div><span class="num">18.07</span></div></td>
+    </tr>
+    <tr>
+      <td>composite ↑</td>
+      <td><div class="barwrap"><div class="bar bar-comp" style="width:62%"></div><span class="num">0.575</span></div></td>
+      <td><div class="barwrap"><div class="bar bar-comp" style="width:67%"></div><span class="num">0.617</span></div></td>
+      <td><div class="barwrap"><div class="bar bar-comp" style="width:73%"></div><span class="num">0.671</span></div></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>② 6 个 ROI 视觉对比</h2>
+<p class="lead">每张图：NOISY → baseline (no TV, 5 min) → λ=0.01 · 5 min → λ=0.01 · 10 min。2× 最近邻放大。</p>
+
+<figure>
+  <img src="_eval/lam01_5vs10_corner_TL.png" alt="corner TL">
+  <figcaption><strong>左上角（暗噪 + 镜头阴影）</strong> · 10 min 比 5 min 更干净一点，亮点更清晰；与 baseline 比角落颗粒明显减少。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/lam01_5vs10_window.png" alt="window">
+  <figcaption><strong>窗户栅栏（最敏感的高频边缘）</strong> · <span class="good">10 min 的栅栏明显比 5 min 更锐</span>，这是边缘指标 +4.7% 的视觉来源。
+  树枝形状也比 5 min 更清晰。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/lam01_5vs10_ceiling.png" alt="ceiling">
+  <figcaption><strong>天花板（大平面 + 接缝）</strong> · 接缝比 5 min 更锐利，平面同样干净。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/lam01_5vs10_floor.png" alt="floor">
+  <figcaption><strong>木地板（中频纹理）</strong> · 10 min 木纹保留更完整，平面整体更平滑。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/lam01_5vs10_shrub.png" alt="shrub">
+  <figcaption><strong>灌木 / 树枝（高频）</strong> · 10 min 树枝边缘更清晰；远处建筑窗格也更分明。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/lam01_5vs10_corner_TR.png" alt="corner TR">
+  <figcaption><strong>右上角（天空 + 暗角）</strong> · 都很干净，10 min 略平整；这种全平面区域几乎无差别。</figcaption>
+</figure>
+
+<h2>③ 关键洞察：TV 不是「永久糊掉」边缘</h2>
+
+<div class="verdict">
+  <h3>「TV 牺牲细节」 ≠ 「TV 永久毁掉细节」</h3>
+  <p>5 min 时 edge=17.26（比 baseline 低 4%），看上去像 TV 把边缘拍扁了。
+     但 <strong>10 min 时 edge=18.07，反而 <em>超过</em> baseline 的 17.97</strong>。</p>
+  <p>原因：TV 项让模型在前期更倾向于「先平」，但只要训练得够久，模型最终学到的是
+  「噪声 → 平 + 边缘 → 保留」 这两个目标的同时优化，而不是把所有东西一律平掉。</p>
+  <p><strong>实际意义：</strong> λ=0.01 是<strong>训练时长越长收益越大</strong>的设置；
+  baseline (no TV) 在 5 min 已经基本收敛。所以：</p>
+  <ul>
+    <li>预算 ≤ 5 min：baseline 和 λ=0.01 差距小（边缘略糊换了一点 blob）</li>
+    <li>预算 ≥ 10 min：<strong>λ=0.01 全面胜出</strong>（边缘追平 + blob 更低 + hf 更低）</li>
+  </ul>
+</div>
+
+<h2>④ 推荐</h2>
+<ul>
+  <li>当前默认 <code>n2n/trainer.py</code> 已经是 <code>l1_plus_tv</code> + <code>lam=0.01</code>。</li>
+  <li>建议训练 <strong>≥ 10 分钟</strong>（GUI 里 <code>--seconds 600</code>），能完整吃到 TV 的好处。</li>
+  <li>如果时间充裕（20–30 min），edge 还会继续涨，blob 会再降一点；但收益会逐渐饱和。</li>
+</ul>
+
+<h3>实验产物</h3>
+<ul>
+  <li><code>experiments/13c_l1_plus_tv_lam01/</code> · 5 min</li>
+  <li><code>experiments/13c_l1_plus_tv_lam01_10min/</code> · 10 min（新）</li>
+  <li><code>experiments/_eval/lam01_5vs10_*.png</code> · 6 个 ROI 视觉对比图</li>
+</ul>
+
+<p class="lead" style="margin-top: 40px; font-size: 12px;">报告基于完整 sensor2 帧推理（非 patch），8 个 ROI 的 blob 度量 + 全图 hf_noise/edge_sharpness。</p>
+
+</div>
+</body>
+</html>

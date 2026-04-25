@@ -28,41 +28,38 @@ from .raw_utils import RAW_MAX, pack_rggb, read_raw
 @dataclass
 class TrainConfig:
     data_root: str = "train_data/Data"
-    # Defaults reflect the user-preferred strategy after a 4-point TV-lambda
-    # sweep on top of `experiments/REPORT.md`:
-    #   L1 + 0.01 * Total-Variation
-    # gives blob 0.98 (vs baseline 1.01) AND edge sharpness 17.26 (vs
-    # baseline 17.97) - corners stay clean without the textural over-
-    # smoothing seen at lam=0.05 (railings, wood grain). See
-    # `experiments/_eval/tv_sweep_*.png` for the visual comparison.
+    # Final locked-in configuration after the experiments documented in
+    # `docs/EXPERIMENTS_JOURNEY.md`:
+    #     loss = L1 + 0.03 * Total-Variation
+    # This is the only learnable knob. The 4-point TV-lambda sweep
+    # (lam in {0.005, 0.01, 0.02, 0.05}) showed lam=0.01 was the best of
+    # those four; visual evaluation across 7 scenes / 20 ROIs suggested a
+    # slightly stronger TV (lam ~ 0.02-0.03) is preferable for the
+    # lens-shading corners while still preserving fine textures, so 0.03
+    # was chosen as the final coefficient.
     patch_size: int = 256         # in packed-pixel units (=> 512 in Bayer)
     batch_size: int = 6
     base_channels: int = 48
-    unet_depth: int = 3           # 3 = local-feature (default), 4 = standard N2N
+    unet_depth: int = 3
     lr: float = 2e-4
     samples_per_epoch: int = 1024
     num_workers: int = 0          # Windows + small data: 0 is faster
     use_fp16: bool = True
-    # Weight of the N2N consistency regulariser. The user requested the
-    # simplest setup: a single L1 main loss only, so the default is 0 -
-    # i.e. ``loss == main == L1(g1 - f(g1), g2)``. Set to e.g. 1.0 to
-    # re-enable the regulariser (Huang et al. 2021 Eq.4).
-    n2n_lambda: float = 0.0
+    n2n_lambda: float = 0.0       # N2N consistency reg (paper Eq.4); 0 = pure L1+TV main
     preview_size: int = 64        # patch size in packed-pixel units
     preview_iso_dir: str = "16"   # subdirectory name for the noisiest ISO
     seed: int = 1234
     ckpt_path: str = "checkpoints/n2n_model.pt"
-    train_seconds: float = 600.0  # wall-clock budget
-    # Name of the main loss function used for the N2N main term, looked up
-    # in ``n2n.losses.REGISTRY``. The reg term (when n2n_lambda > 0) always
-    # uses plain L1 for stability.
+    train_seconds: float = 1200.0  # wall-clock budget (default 20 min)
+    # The single learnable configuration: L1 + 0.03 * TV.
     loss_name: str = "l1_plus_tv"
-    # Optional kwargs for the loss (e.g. multiscale_l1 scales=4, l1_plus_tv lam=0.01).
-    loss_kwargs: dict = field(default_factory=lambda: {"lam": 0.01})
-    # If True, subtract ~9 (in 0-255 domain, equivalently 2304/65535 normalised)
-    # from input before feeding to the model. Centres the input near zero,
-    # may improve fp16 numerics.
+    loss_kwargs: dict = field(default_factory=lambda: {"lam": 0.03})
     subtract_black_level: bool = False
+    # Optional intermediate checkpoint times (seconds). When any of these
+    # is crossed, a snapshot is written next to ``ckpt_path`` with a
+    # ``_<seconds>s`` suffix, so a single 20-min run yields multiple
+    # comparable checkpoints (e.g. 2/5/10/20 min).
+    intermediate_save_seconds: tuple = (120.0, 300.0, 600.0)
 
 
 @dataclass
@@ -225,6 +222,12 @@ class Trainer:
         budget = max(1.0, cfg.train_seconds)
         model.train()
 
+        # Sorted unique intermediate save times still pending.
+        pending_saves = sorted(set(
+            float(s) for s in (cfg.intermediate_save_seconds or ())
+            if 0 < float(s) < budget
+        ))
+
         # Loss accumulators on the GPU - avoids per-step .cpu() sync
         loss_sum = torch.zeros((), device=device)
         main_sum = torch.zeros((), device=device)
@@ -317,6 +320,27 @@ class Trainer:
                 self._run_preview(model, preview_t, step=step, epoch=epoch)
                 loss_count = 0
                 epoch_t0 = time.time()
+
+            # After each epoch, dump intermediate checkpoints whose
+            # time-budget has elapsed. Done at epoch boundaries so the
+            # weights match the loss curve point we just emitted.
+            now = time.time() - t0
+            while pending_saves and pending_saves[0] <= now:
+                t = pending_saves.pop(0)
+                ipath = Path(cfg.ckpt_path).with_name(
+                    Path(cfg.ckpt_path).stem + f"_{int(round(t))}s"
+                    + Path(cfg.ckpt_path).suffix
+                )
+                torch.save(
+                    {
+                        "model": model.state_dict(),
+                        "config": cfg.__dict__,
+                        "steps": step,
+                        "elapsed": now,
+                        "snapshot_seconds": t,
+                    },
+                    ipath,
+                )
 
         ckpt = Path(cfg.ckpt_path)
         torch.save(

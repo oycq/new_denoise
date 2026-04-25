@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>L1 + λ·TV 正则强度对比报告</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --line: #232735;
+    --ink: #d6dae4;
+    --muted: #8b91a3;
+    --accent: #6cf;
+    --good: #5cd97a;
+    --bad: #ff7b6b;
+    --warn: #ffce5e;
+    --neutral: #9ea4b6;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                            "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+               line-height: 1.6; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 36px 0 12px; padding-bottom: 8px;
+       border-bottom: 1px solid var(--line); color: var(--accent); }
+  h3 { font-size: 16px; margin: 18px 0 8px; color: #c8d0e2; }
+  p, li { color: var(--ink); }
+  .muted { color: var(--muted); }
+  .lead { color: var(--muted); font-size: 15px; margin-top: 4px; }
+  code, kbd { background: #20242f; color: #f1d36b; padding: 1px 6px; border-radius: 4px;
+              font-family: "SF Mono", "JetBrains Mono", Consolas, monospace; font-size: 13px; }
+  pre { background: var(--panel); padding: 12px 14px; border-radius: 6px;
+        border: 1px solid var(--line); overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 16px;
+          background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line);
+           font-size: 14px; }
+  th { background: #1c2030; color: var(--accent); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .good   { color: var(--good); font-weight: 600; }
+  .bad    { color: var(--bad);  font-weight: 600; }
+  .warn   { color: var(--warn); font-weight: 600; }
+  .neutral{ color: var(--neutral); }
+  .row-hl td { background: #1a2533; }
+  figure { margin: 12px 0 24px; }
+  figure img { width: 100%; max-width: 100%; height: auto;
+               border: 1px solid var(--line); border-radius: 4px;
+               image-rendering: pixelated; image-rendering: crisp-edges; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .verdict { background: linear-gradient(180deg, #1d2a3d 0%, #1a2030 100%);
+             border: 1px solid #2a4a6a; border-left: 4px solid var(--accent);
+             padding: 16px 20px; border-radius: 6px; margin: 20px 0; }
+  .verdict h3 { margin-top: 0; color: var(--accent); }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+          padding: 12px 14px; font-size: 13px; }
+  .card .lam { font-size: 18px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+  .card .tag { display: inline-block; padding: 2px 8px; border-radius: 10px;
+               font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+  .tag.best  { background: #143822; color: var(--good); border: 1px solid #25602f; }
+  .tag.alt   { background: #25361f; color: #b9e07a; border: 1px solid #3d5a30; }
+  .tag.over  { background: #3a1f1f; color: var(--bad);  border: 1px solid #5a2828; }
+  .tag.weak  { background: #2a2a2a; color: var(--neutral); border: 1px solid #444; }
+  ul { padding-left: 20px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted);
+            margin: 4px 0 16px; }
+  .legend .arrow { color: var(--ink); font-weight: 600; }
+  .barwrap { display: flex; align-items: center; gap: 8px; }
+  .bar { height: 8px; border-radius: 4px; min-width: 4px; }
+  .bar-blob { background: var(--bad); }
+  .bar-edge { background: var(--good); }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+         padding: 12px 18px; font-size: 14px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>L1 + λ · TV 正则强度对比报告</h1>
+<p class="lead">在 <code>l1_plus_tv</code> 损失上扫描 4 个 λ：0.005 / 0.01 / 0.02 / 0.05，每组 5 min 训练。
+对比 baseline（纯 L1）与 N=5 的候选。</p>
+
+<div class="toc">
+  <strong>目录</strong> ·
+  <a href="#tv">① TV 正则机制</a> ·
+  <a href="#metrics">② 量化指标</a> ·
+  <a href="#tradeoff">③ 趋势</a> ·
+  <a href="#visual">④ 6 个 ROI 视觉对比</a> ·
+  <a href="#perlam">⑤ 各 λ 优劣分析</a> ·
+  <a href="#verdict">⑥ 结论</a>
+</div>
+
+<h2 id="tv">① 什么是 L1 + λ · TV？</h2>
+
+<p>训练损失：</p>
+<pre>loss = L1(denoised, target) + λ · TotalVariation(denoised)
+
+TV(I) = mean( |I(x+1,y) − I(x,y)| ) + mean( |I(x,y+1) − I(x,y)| )</pre>
+
+<p>TV 项惩罚 <strong>相邻像素的差</strong>：</p>
+<ul>
+  <li><strong>大平面（天花板、角落、天空）</strong>：相邻像素本来差很小，TV 项几乎不影响 → 噪声团块被「拉平」；</li>
+  <li><strong>边缘 / 纹理（栅栏、木纹、树枝）</strong>：相邻像素差就是边缘本身，被 TV 一起惩罚 → λ 越大边缘越糊。</li>
+</ul>
+<p>所以 <strong>λ 是「平面干净」 ↔ 「细节锐利」 之间的旋钮</strong>。</p>
+
+<h2 id="metrics">② 量化指标对比</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>策略</th>
+      <th class="num">λ</th>
+      <th class="num">blob ↓<br><span class="muted" style="font-weight:400">大平面低频残留</span></th>
+      <th class="num">hf_noise ↓<br><span class="muted" style="font-weight:400">高频噪声底</span></th>
+      <th class="num">edge ↑<br><span class="muted" style="font-weight:400">边缘锐度</span></th>
+      <th class="num">composite ↑<br><span class="muted" style="font-weight:400">加权综合</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>baseline (no TV)</td>
+      <td class="num">—</td>
+      <td class="num neutral">1.006</td>
+      <td class="num neutral">0.890</td>
+      <td class="num good">17.97</td>
+      <td class="num neutral">0.575</td>
+    </tr>
+    <tr>
+      <td>13d_l1_plus_tv_lam005</td>
+      <td class="num">0.005</td>
+      <td class="num bad">1.033</td>
+      <td class="num bad">0.902</td>
+      <td class="num good">18.27</td>
+      <td class="num bad">0.493</td>
+    </tr>
+    <tr class="row-hl">
+      <td><strong>13c_l1_plus_tv_lam01</strong></td>
+      <td class="num"><strong>0.01</strong></td>
+      <td class="num good">0.981</td>
+      <td class="num neutral">0.891</td>
+      <td class="num good">17.26</td>
+      <td class="num good">0.617</td>
+    </tr>
+    <tr>
+      <td>13b_l1_plus_tv_lam02</td>
+      <td class="num">0.02</td>
+      <td class="num good">0.983</td>
+      <td class="num good">0.809</td>
+      <td class="num warn">16.54</td>
+      <td class="num good">0.612</td>
+    </tr>
+    <tr>
+      <td>13_l1_plus_tv (原始)</td>
+      <td class="num">0.05</td>
+      <td class="num good">0.940</td>
+      <td class="num good">0.699</td>
+      <td class="num bad">15.45</td>
+      <td class="num good">0.750</td>
+    </tr>
+  </tbody>
+</table>
+<div class="legend">
+  <span><span class="arrow">↓</span> 越小越好</span>
+  <span><span class="arrow">↑</span> 越大越好</span>
+  <span><span class="good">绿</span> = 优于 baseline</span>
+  <span><span class="warn">橙</span> = 略劣</span>
+  <span><span class="bad">红</span> = 明显劣</span>
+</div>
+
+<h3>每个 ROI 的 blob 残留细节</h3>
+<table>
+  <thead>
+    <tr><th>ROI（区域）</th><th class="num">baseline</th><th class="num">λ=0.005</th><th class="num">λ=0.01</th><th class="num">λ=0.02</th><th class="num">λ=0.05</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>ceiling_a（天花板大块）</td><td class="num neutral">1.10</td><td class="num bad">1.10</td><td class="num neutral">1.05</td><td class="num good">1.03</td><td class="num good">1.01</td></tr>
+    <tr><td>ceiling_b（天花板小块）</td><td class="num neutral">0.45</td><td class="num bad">0.46</td><td class="num neutral">0.43</td><td class="num good">0.41</td><td class="num good">0.41</td></tr>
+    <tr><td>corner_TL（左上暗角）</td><td class="num neutral">0.78</td><td class="num good">0.71</td><td class="num good">0.66</td><td class="num good">0.71</td><td class="num good">0.59</td></tr>
+    <tr><td>corner_BL（左下暗角）</td><td class="num neutral">0.67</td><td class="num good">0.65</td><td class="num good">0.62</td><td class="num good">0.64</td><td class="num good">0.54</td></tr>
+    <tr><td>corner_BR（右下暗角）</td><td class="num neutral">1.81</td><td class="num bad">1.92</td><td class="num bad">1.82</td><td class="num bad">1.82</td><td class="num good">1.73</td></tr>
+    <tr><td>corner_TR（右上天空）</td><td class="num neutral">0.60</td><td class="num bad">0.61</td><td class="num bad">0.61</td><td class="num good">0.59</td><td class="num good">0.60</td></tr>
+    <tr><td>floor_far（远处地板）</td><td class="num neutral">1.81</td><td class="num bad">1.97</td><td class="num neutral">1.82</td><td class="num bad">1.84</td><td class="num neutral">1.82</td></tr>
+    <tr><td>sky_top（顶部天空）</td><td class="num neutral">0.83</td><td class="num bad">0.84</td><td class="num bad">0.84</td><td class="num good">0.82</td><td class="num good">0.82</td></tr>
+  </tbody>
+</table>
+
+<h2 id="tradeoff">③ λ 越大 → 角落越干净，但边缘越糊</h2>
+
+<table>
+  <thead><tr><th>λ</th><th>blob ↓（条形越短越好）</th><th>edge ↑（条形越长越好）</th></tr></thead>
+  <tbody>
+    <tr><td>baseline</td>
+        <td><div class="barwrap"><div class="bar bar-blob" style="width: 86%"></div><span class="num">1.006</span></div></td>
+        <td><div class="barwrap"><div class="bar bar-edge" style="width: 90%"></div><span class="num">17.97</span></div></td></tr>
+    <tr><td>0.005</td>
+        <td><div class="barwrap"><div class="bar bar-blob" style="width: 89%"></div><span class="num">1.033</span></div></td>
+        <td><div class="barwrap"><div class="bar bar-edge" style="width: 91%"></div><span class="num">18.27</span></div></td></tr>
+    <tr class="row-hl"><td><strong>0.01</strong></td>
+        <td><div class="barwrap"><div class="bar bar-blob" style="width: 84%"></div><span class="num">0.981</span></div></td>
+        <td><div class="barwrap"><div class="bar bar-edge" style="width: 86%"></div><span class="num">17.26</span></div></td></tr>
+    <tr><td>0.02</td>
+        <td><div class="barwrap"><div class="bar bar-blob" style="width: 84%"></div><span class="num">0.983</span></div></td>
+        <td><div class="barwrap"><div class="bar bar-edge" style="width: 83%"></div><span class="num">16.54</span></div></td></tr>
+    <tr><td>0.05</td>
+        <td><div class="barwrap"><div class="bar bar-blob" style="width: 81%"></div><span class="num">0.940</span></div></td>
+        <td><div class="barwrap"><div class="bar bar-edge" style="width: 77%"></div><span class="num">15.45</span></div></td></tr>
+  </tbody>
+</table>
+
+<p class="muted">关键观察：</p>
+<ul>
+  <li><strong>λ=0.005</strong>：blob 比 baseline 还略差（1.033 vs 1.006），<strong>TV 太弱根本没起作用</strong>。</li>
+  <li><strong>λ=0.01</strong>：是「拐点」—— blob 第一次明显低于 baseline（0.98），但边缘损失不到 4%（17.26 vs 17.97）。</li>
+  <li><strong>λ=0.02</strong>：blob 几乎不变（0.98），<strong>但边缘掉到 16.54</strong>，性价比变差。</li>
+  <li><strong>λ=0.05</strong>：blob 最低（0.94），<strong>边缘掉 14%</strong>（15.45），细节牺牲明显。</li>
+</ul>
+
+<h2 id="visual">④ 6 个 ROI 视觉对比（全部带 NOISY 参考）</h2>
+<p class="muted">每张图从左到右：噪声原图 → baseline → λ=0.005 → 0.01 → 0.02 → 0.05。已 2× 最近邻放大。</p>
+
+<figure>
+  <img src="_eval/tv_sweep_corner_TL.png" alt="corner TL">
+  <figcaption><strong>左上角（暗噪重灾区，镜头阴影）</strong> · λ=0.005 几乎=baseline 仍可见颗粒；λ=0.01 干净并保留小亮点；λ=0.05 最干净但亮点被压扁、过渡塑料化。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/tv_sweep_corner_TR.png" alt="corner TR">
+  <figcaption><strong>右上角（天空 + 暗角）</strong> · 都很干净，差别小；λ=0.005 仍有少量颗粒。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/tv_sweep_ceiling.png" alt="ceiling">
+  <figcaption><strong>天花板（大平面 + 接缝）</strong> · λ=0.005 残留低频块；<strong>λ=0.01 接缝最清晰且平面干净</strong>；λ=0.05 接缝被「擦」得偏弱。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/tv_sweep_window.png" alt="window">
+  <figcaption><strong>窗户栅栏（高频边缘）</strong> · 这是 TV 副作用最明显的区域。<strong>λ=0.005/0.01 栅栏锐</strong>；λ=0.02 栅栏开始变粗；<strong>λ=0.05 栅栏明显糊、变粗一圈</strong>。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/tv_sweep_shrub.png" alt="shrub">
+  <figcaption><strong>灌木 / 树枝（高频）</strong> · λ 越大树枝越软；λ=0.05 树枝边缘变虚；λ=0.01 几乎=baseline 但更干净。</figcaption>
+</figure>
+
+<figure>
+  <img src="_eval/tv_sweep_floor.png" alt="floor">
+  <figcaption><strong>木地板（中频纹理）</strong> · 木纹细节是分水岭。λ=0.005 木纹清晰；λ=0.01 仍有完整木纹；λ=0.02 木纹略弱化；<strong>λ=0.05 木纹几乎消失，过塑料</strong>。</figcaption>
+</figure>
+
+<h2 id="perlam">⑤ 各 λ 综合分析</h2>
+
+<div class="grid4">
+  <div class="card">
+    <div class="lam">λ = 0.005</div>
+    <span class="tag weak">弱到失效</span>
+    <ul>
+      <li>blob 比 baseline 略差</li>
+      <li>边缘最锐（18.27）但是「锐」的是 baseline 的颗粒</li>
+      <li>视觉上跟 baseline 几乎一样</li>
+      <li>结论：<span class="bad">不要用</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="lam">λ = 0.01</div>
+    <span class="tag best">推荐</span>
+    <ul>
+      <li>blob 第一次显著优于 baseline（−2.5%）</li>
+      <li>边缘几乎不损失（−4%）</li>
+      <li>木纹、栅栏、树枝完整</li>
+      <li>角落明显比 baseline 干净</li>
+      <li>结论：<span class="good">甜蜜点</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="lam">λ = 0.02</div>
+    <span class="tag alt">次选</span>
+    <ul>
+      <li>blob 与 0.01 持平</li>
+      <li>边缘掉到 16.54（−8%）</li>
+      <li>栅栏轻微变粗，木纹略弱</li>
+      <li>角落跟 0.01 几乎一样</li>
+      <li>结论：<span class="warn">没必要更大</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="lam">λ = 0.05</div>
+    <span class="tag over">过度</span>
+    <ul>
+      <li>blob 最低（−6%）</li>
+      <li>但边缘掉 14%（15.45）</li>
+      <li>木纹消失、栅栏糊、树枝软</li>
+      <li>视觉「塑料感」</li>
+      <li>结论：<span class="bad">过度平滑</span></li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="verdict">⑥ 结论</h2>
+
+<div class="verdict">
+  <h3>推荐：λ = 0.01</h3>
+  <p>在 4 个 λ 中，<strong>0.01 是唯一一个同时</strong>：</p>
+  <ul>
+    <li>降低大平面 blob（0.98 < baseline 1.01）</li>
+    <li>显著清理角落暗噪（corner_TL 0.66 vs baseline 0.78，−15%）</li>
+    <li>保留绝大部分高频细节（边缘锐度仅掉 4%）</li>
+  </ul>
+  <p>而 <strong>0.005 太弱、0.02 边缘开始软、0.05 已经在牺牲细节</strong>。</p>
+  <p>我已经把 <code>n2n/trainer.py</code> 的默认 <code>loss_kwargs</code> 改成 <code>{"lam": 0.01}</code>，
+  下次启动训练直接生效。</p>
+</div>
+
+<h3>怎么换 λ</h3>
+<pre>// n2n/trainer.py 的 TrainConfig
+loss_name: str = "l1_plus_tv"
+loss_kwargs: dict = field(default_factory=lambda: {"lam": <span style="color:#f1d36b">0.01</span>})  # 改这里</pre>
+
+<h3>实验产物路径</h3>
+<ul>
+  <li><code>experiments/13_l1_plus_tv/</code>（λ=0.05，原始）</li>
+  <li><code>experiments/13b_l1_plus_tv_lam02/</code>（λ=0.02）</li>
+  <li><code>experiments/13c_l1_plus_tv_lam01/</code>（λ=0.01，<strong>推荐</strong>）</li>
+  <li><code>experiments/13d_l1_plus_tv_lam005/</code>（λ=0.005）</li>
+  <li><code>experiments/_eval/tv_sweep_*.png</code>（本报告引用的视觉对比图）</li>
+</ul>
+
+<p class="muted" style="margin-top: 40px; font-size: 12px;">生成于 4 个独立 5-min 训练 + 量化评估，
+seed 固定，候选基于完整 sensor2 帧推理（非 patch）。</p>
+
+</div>
+</body>
+</html>

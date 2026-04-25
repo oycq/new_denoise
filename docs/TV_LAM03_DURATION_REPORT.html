@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>L1 + 0.03·TV · 训练时长对比（2/5/10/20 min）</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161922; --line: #232735;
+    --ink: #d6dae4; --muted: #8b91a3; --accent: #6cf;
+    --good: #5cd97a; --bad: #ff7b6b; --warn: #ffce5e;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+               font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+               line-height: 1.55; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 32px 28px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 { font-size: 20px; margin: 36px 0 12px; padding-bottom: 8px;
+       border-bottom: 1px solid var(--line); color: var(--accent); }
+  h3 { font-size: 16px; margin: 18px 0 8px; color: #c8d0e2; }
+  h4 { font-size: 14px; margin: 6px 0 4px; color: var(--ink); font-weight: 600; }
+  .lead { color: var(--muted); font-size: 15px; margin-top: 4px; }
+  code { background: #20242f; color: #f1d36b; padding: 1px 6px; border-radius: 4px;
+         font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; }
+  pre { background: var(--panel); padding: 12px 14px; border-radius: 6px;
+        border: 1px solid var(--line); overflow-x: auto; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 16px;
+          background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+          font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { background: #1c2030; color: var(--accent); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .row-best td { background: #14301c; }
+  .good { color: var(--good); font-weight: 600; }
+  .bad  { color: var(--bad);  font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  figure { margin: 10px 0 14px; padding: 10px;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  figure img { width: 100%; height: auto; border-radius: 4px;
+               image-rendering: pixelated; image-rendering: crisp-edges; display: block; }
+  figcaption { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  figcaption strong { color: var(--ink); }
+  .verdict { background: linear-gradient(180deg, #1d2a3d 0%, #1a2030 100%);
+             border: 1px solid #2a4a6a; border-left: 4px solid var(--accent);
+             padding: 16px 20px; border-radius: 6px; margin: 20px 0; }
+  .verdict h3 { margin-top: 0; color: var(--accent); }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+         padding: 12px 18px; font-size: 13px; columns: 2; column-gap: 24px; }
+  .toc a { color: var(--accent); text-decoration: none; display: block; padding: 2px 0; }
+  .toc a:hover { text-decoration: underline; }
+  .cat { display: inline-block; padding: 1px 7px; border-radius: 10px;
+         font-size: 10px; font-weight: 600; margin-left: 8px; vertical-align: middle; }
+  .cat.shading  { background: #25361f; color: #b9e07a; }
+  .cat.smooth   { background: #1f2840; color: #94b8ff; }
+  .cat.grid     { background: #2c2148; color: #c8a3ff; }
+  .cat.edges    { background: #432828; color: #ffaeae; }
+  .cat.foliage  { background: #1d3a26; color: #6dd897; }
+  .cat.texture  { background: #3a2c1d; color: #ffd497; }
+  .cat.pattern  { background: #2c3a30; color: #b0d6b8; }
+  .cat.specular { background: #2a2a2a; color: #d6dae4; }
+  .cat.complex  { background: #3a2335; color: #f098cc; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>L1 + 0.03·TV · 训练时长对比（2 / 5 / 10 / 20 min）</h1>
+<p class="lead">阶段 5 的最终验证：在敲定的最终配置 <code>l1_plus_tv</code> + <code>lam=0.03</code> 上跑一次
+20 分钟训练，途中在 2 / 5 / 10 / 20 min 各存一份 checkpoint，对 7 个场景
+20 个 ROI 做四时长视觉对比，确认收敛行为。</p>
+
+<h2>① 配置 & 训练统计</h2>
+
+<pre>loss      l1_plus_tv (lam=0.03)
+patch     256 (packed-pixel, == 512 Bayer)
+batch     6
+unet      depth=3, base=48 (~3.05 M parameters, ~12 MB ckpt)
+fp16      true
+sps       ~36.4 steps/sec on RTX 2070
+optimizer Adam lr=2e-4
+seed      1234
+
+intermediate ckpts saved at:
+  120 s  (2 min)
+  300 s  (5 min)
+  600 s  (10 min)
+ 1200 s  (20 min, final)</pre>
+
+<table>
+  <thead><tr><th>时长</th><th class="num">epoch</th><th class="num">step</th><th class="num">main loss (=L1+0.03·TV)</th><th class="num">下降幅度 vs 2min</th></tr></thead>
+  <tbody>
+    <tr><td>2 min  (120 s)</td><td class="num">26</td><td class="num">~4 400</td><td class="num">0.01857</td><td class="num">—</td></tr>
+    <tr><td>5 min  (300 s)</td><td class="num">65</td><td class="num">~11 000</td><td class="num">0.01787</td><td class="num good">−3.8%</td></tr>
+    <tr><td>10 min (600 s)</td><td class="num">130</td><td class="num">~22 000</td><td class="num">0.01734</td><td class="num good">−6.6%</td></tr>
+    <tr class="row-best"><td><strong>20 min (1 200 s)</strong></td><td class="num">258</td><td class="num">43 793</td><td class="num"><strong>0.01662</strong></td><td class="num good"><strong>−10.5%</strong></td></tr>
+  </tbody>
+</table>
+
+<h2>② 20 ROI 视觉对比</h2>
+<p class="lead">同一图：<strong>NOISY → 2min → 5min → 10min → 20min</strong>，2× 最近邻放大。</p>
+
+<div class="toc">
+  <a href="#roi01">#01 暗角 + 镜头阴影 <span class="cat shading">shading</span></a>
+  <a href="#roi02">#02 桥底混凝土平面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi03">#03 建筑窗格垂直线 <span class="cat grid">grid</span></a>
+  <a href="#roi04">#04 长椅木纹 <span class="cat texture">texture</span></a>
+  <a href="#roi05">#05 楼梯栏杆（高频） <span class="cat edges">edges</span></a>
+  <a href="#roi06">#06 天空大平面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi07">#07 玻璃塔楼网格 <span class="cat grid">grid</span></a>
+  <a href="#roi08">#08 树枝密集 <span class="cat foliage">foliage</span></a>
+  <a href="#roi09">#09 砖路图案 <span class="cat pattern">pattern</span></a>
+  <a href="#roi10">#10 灌木叶丛 <span class="cat foliage">foliage</span></a>
+  <a href="#roi11">#11 暗角（极暗） <span class="cat shading">shading</span></a>
+  <a href="#roi12">#12 白墙大平面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi13">#13 桥曲面 <span class="cat smooth">smooth</span></a>
+  <a href="#roi14">#14 自行车密堆 <span class="cat complex">complex</span></a>
+  <a href="#roi15">#15 写字楼百叶窗 <span class="cat grid">grid</span></a>
+  <a href="#roi16">#16 树干 + 树皮 <span class="cat texture">texture</span></a>
+  <a href="#roi17">#17 玻璃幕墙反射 <span class="cat specular">specular</span></a>
+  <a href="#roi18">#18 灌木丛纹理 <span class="cat foliage">foliage</span></a>
+  <a href="#roi19">#19 自行车辐条 <span class="cat edges">edges</span></a>
+  <a href="#roi20">#20 沿街店铺招牌 <span class="cat complex">complex</span></a>
+</div>
+
+<figure id="roi01">
+  <h4>#01 changqiao_qiaodi · 左上暗角 <span class="cat shading">shading</span></h4>
+  <img src="_eval/rois_20_lam03/01_corner_TL_lens.png" alt="01">
+  <figcaption>2 min 已经把彩噪基本压平；5 min 之后是底噪和细节的微调。
+  <strong>10 / 20 min 几乎不可分辨</strong>，亮点保留。</figcaption>
+</figure>
+
+<figure id="roi02">
+  <h4>#02 changqiao_qiaodi · 桥底混凝土 <span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20_lam03/02_ceiling_concrete.png" alt="02">
+  <figcaption>2 min 仍可见红蓝彩噪；5 min 大幅平滑；
+  <strong>10 / 20 min 已收敛</strong>。</figcaption>
+</figure>
+
+<figure id="roi03">
+  <h4>#03 changqiao_qiaodi · 建筑窗格 <span class="cat grid">grid</span></h4>
+  <img src="_eval/rois_20_lam03/03_window_grid.png" alt="03">
+  <figcaption>窗框对比度 2 → 5 → 10 min 持续提高；20 min 框线最锐。</figcaption>
+</figure>
+
+<figure id="roi04">
+  <h4>#04 changqiao_qiaodi · 长椅木纹 <span class="cat texture">texture</span></h4>
+  <img src="_eval/rois_20_lam03/04_bench_wood_grain.png" alt="04">
+  <figcaption>木纹保留：2 min 偏噪；5 min 木纹清晰；
+  <strong>10 → 20 min 木纹基本不变</strong>，边缘略加深。</figcaption>
+</figure>
+
+<figure id="roi05">
+  <h4>#05 langan_louti · 楼梯栏杆 <span class="cat edges">edges</span></h4>
+  <img src="_eval/rois_20_lam03/05_railing_high_freq.png" alt="05">
+  <figcaption>所有时长栅栏都清晰（高对比度边缘 TV 处理友好）；20 min 栏杆边缘最锐。</figcaption>
+</figure>
+
+<figure id="roi06">
+  <h4>#06 langan_louti · 天空 <span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20_lam03/06_sky_smooth_flat.png" alt="06">
+  <figcaption>天空大平面所有时长都很干净，差别很小。</figcaption>
+</figure>
+
+<figure id="roi07">
+  <h4>#07 langan_louti · 玻璃塔楼网格 <span class="cat grid">grid</span></h4>
+  <img src="_eval/rois_20_lam03/07_glass_tower_grid.png" alt="07">
+  <figcaption>反射细节 5 min 起开始显形；20 min 最清晰。</figcaption>
+</figure>
+
+<figure id="roi08">
+  <h4>#08 louti_shumu_caoguan · 树枝密集 <span class="cat foliage">foliage</span></h4>
+  <img src="_eval/rois_20_lam03/08_tree_branches.png" alt="08">
+  <figcaption>叶片间隙的高光：2 min 偏噪；5 min 显著改善；10 / 20 min 树叶层次最清。</figcaption>
+</figure>
+
+<figure id="roi09">
+  <h4>#09 louti_shumu_caoguan · 砖路图案 <span class="cat pattern">pattern</span></h4>
+  <img src="_eval/rois_20_lam03/09_brick_pavement.png" alt="09">
+  <figcaption>砖缝在所有时长都被保留；20 min 砖块界限略锐一点。</figcaption>
+</figure>
+
+<figure id="roi10">
+  <h4>#10 louti_shumu_caoguan · 灌木叶丛 <span class="cat foliage">foliage</span></h4>
+  <img src="_eval/rois_20_lam03/10_dense_shrubs.png" alt="10">
+  <figcaption>2 → 5 min 噪声大幅减少；10 / 20 min 叶子轮廓更清晰。</figcaption>
+</figure>
+
+<figure id="roi11">
+  <h4>#11 qiang_qiaodi · 极暗角 <span class="cat shading">shading</span></h4>
+  <img src="_eval/rois_20_lam03/11_corner_BR_dark.png" alt="11">
+  <figcaption>暗角降噪 2 min 已经显著；后面是细节恢复。20 min 桥底边缘和水管最清。</figcaption>
+</figure>
+
+<figure id="roi12">
+  <h4>#12 qiang_qiaodi · 白墙大平面 <span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20_lam03/12_wall_white_smooth.png" alt="12">
+  <figcaption>大平面 5 min 起就基本完美干净，10 / 20 min 几乎相同。</figcaption>
+</figure>
+
+<figure id="roi13">
+  <h4>#13 qiang_qiaodi · 桥曲面 <span class="cat smooth">smooth</span></h4>
+  <img src="_eval/rois_20_lam03/13_bridge_curve.png" alt="13">
+  <figcaption>软高光的弧形：所有时长平面都干净，差异小。</figcaption>
+</figure>
+
+<figure id="roi14">
+  <h4>#14 shumu_guanmu_che · 自行车密堆 <span class="cat complex">complex</span></h4>
+  <img src="_eval/rois_20_lam03/14_bicycle_cluster.png" alt="14">
+  <figcaption>复杂场景：5 → 10 min 单车细节明显增多；20 min 边缘最清。</figcaption>
+</figure>
+
+<figure id="roi15">
+  <h4>#15 shumu_guanmu_che · 写字楼百叶窗 <span class="cat grid">grid</span></h4>
+  <img src="_eval/rois_20_lam03/15_tower_blinds_vert.png" alt="15">
+  <figcaption>百叶窗这种高频网格：2 min 已不错；20 min 略更锐，但差别不大。</figcaption>
+</figure>
+
+<figure id="roi16">
+  <h4>#16 shumu_guanmu_che · 树干 <span class="cat texture">texture</span></h4>
+  <img src="_eval/rois_20_lam03/16_tree_trunk_dark.png" alt="16">
+  <figcaption>树皮纹理：2 min 仍带颗粒；5 min 显著改善；10 / 20 min 树皮纹理保留得最完整。</figcaption>
+</figure>
+
+<figure id="roi17">
+  <h4>#17 shumu_langan · 玻璃幕墙反射 <span class="cat specular">specular</span></h4>
+  <img src="_eval/rois_20_lam03/17_glass_facade.png" alt="17">
+  <figcaption>反射细节随时长稳步增加；<strong>20 min 反射最丰富</strong>且不带颗粒。</figcaption>
+</figure>
+
+<figure id="roi18">
+  <h4>#18 shumu_langan · 灌木丛纹理 <span class="cat foliage">foliage</span></h4>
+  <img src="_eval/rois_20_lam03/18_hedge_texture.png" alt="18">
+  <figcaption>2 min 仍噪；5 min 显著改善；10 / 20 min 灌木质感更立体。</figcaption>
+</figure>
+
+<figure id="roi19">
+  <h4>#19 zixingche_shumu_jiedao · 自行车辐条 <span class="cat edges">edges</span></h4>
+  <img src="_eval/rois_20_lam03/19_bicycle_spokes.png" alt="19">
+  <figcaption>辐条这种<strong>最细的高频</strong>：2 min 已经可见；
+  20 min 辐条最锐 + 平面最干净 —— 时长收益明显。</figcaption>
+</figure>
+
+<figure id="roi20">
+  <h4>#20 zixingche_shumu_jiedao · 沿街店铺招牌 <span class="cat complex">complex</span></h4>
+  <img src="_eval/rois_20_lam03/20_shop_signs.png" alt="20">
+  <figcaption>玻璃 + 文字混合：5 → 10 → 20 min 文字逐渐变锐，店内细节越来越清。</figcaption>
+</figure>
+
+<h2>③ 收敛行为总结</h2>
+
+<table>
+  <thead>
+    <tr><th>ROI 类别</th><th>2 → 5 min</th><th>5 → 10 min</th><th>10 → 20 min</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>暗角 / 镜头阴影 (#01, #11)</td>
+      <td class="good">大幅清噪</td>
+      <td class="good">细节恢复</td>
+      <td class="warn">几乎不变</td>
+    </tr>
+    <tr>
+      <td>大平面 (#02, #06, #12, #13)</td>
+      <td class="good">大幅清噪</td>
+      <td class="warn">小幅微调</td>
+      <td class="warn">几乎不变</td>
+    </tr>
+    <tr>
+      <td>网格 / 百叶 (#03, #07, #15)</td>
+      <td class="good">对比度提升</td>
+      <td class="good">边缘变锐</td>
+      <td class="good">轻微变锐</td>
+    </tr>
+    <tr>
+      <td>边缘 / 高频 (#05, #19)</td>
+      <td class="warn">几乎相同</td>
+      <td class="good">边缘恢复</td>
+      <td class="good">辐条最锐</td>
+    </tr>
+    <tr>
+      <td>纹理 (#04, #16)</td>
+      <td class="good">大幅清噪</td>
+      <td class="good">纹理变清</td>
+      <td class="warn">微弱变化</td>
+    </tr>
+    <tr>
+      <td>树叶 / 灌木 (#08, #10, #18)</td>
+      <td class="good">大幅清噪</td>
+      <td class="good">层次变清</td>
+      <td class="good">叶片轮廓更稳</td>
+    </tr>
+    <tr>
+      <td>玻璃高光 / 反射 (#17)</td>
+      <td class="good">从模糊变清</td>
+      <td class="good">反射细节增多</td>
+      <td class="good">最丰富</td>
+    </tr>
+    <tr>
+      <td>复杂场景 (#14, #20)</td>
+      <td class="good">边缘逐步显形</td>
+      <td class="good">细节继续增多</td>
+      <td class="good">文字 / 单车最清</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>④ 结论与建议</h2>
+
+<div class="verdict">
+  <h3>20 min 训练是 lam=0.03 的「合适」时长</h3>
+  <p>从 4 个时长的对比可以看出 <strong>3 个收敛阶段</strong>：</p>
+  <ol>
+    <li><strong>2 → 5 min（噪声压制阶段）</strong>：所有 ROI 上的彩噪都被显著清掉，
+    平面区域基本完成。损失从 0.01857 → 0.01787（−3.8%）。</li>
+    <li><strong>5 → 10 min（细节恢复阶段）</strong>：网格 / 边缘 / 纹理 / 树叶
+    的细节明显回来，损失继续下降到 0.01734（−6.6%）。</li>
+    <li><strong>10 → 20 min（精修阶段）</strong>：高频细节（辐条 / 玻璃反射 /
+    文字 / 复杂场景）继续锐化，平面已收敛。损失到 0.01662（−10.5%）。</li>
+  </ol>
+
+  <p>给定 20 min 预算，能享受全部三阶段收益。如果时间有限：</p>
+  <ul>
+    <li><strong>≥ 20 min</strong>：推荐，全部 ROI 都到达稳定状态</li>
+    <li><strong>10 min</strong>：可接受，平面 / 网格 / 多数纹理已完成；高频细节略软</li>
+    <li><strong>5 min</strong>：仅当时间紧张；纹理和细节明显欠加工</li>
+    <li><strong>2 min</strong>：只能算「降噪 demo」，远未收敛</li>
+  </ul>
+</div>
+
+<h3>当前默认（已配置）</h3>
+<pre>n2n/trainer.py:
+  loss_name    = "l1_plus_tv"
+  loss_kwargs  = {"lam": 0.03}
+  train_seconds= 1200      # 20 min
+  intermediate_save_seconds = (120, 300, 600)  # 自动存 2/5/10 min 的快照</pre>
+
+<p>启动训练：</p>
+<pre>python run_train.py            # 启 GUI，按下 Start 开始
+# 或直接 headless：
+python -c "from n2n.trainer import Trainer, TrainConfig; Trainer(TrainConfig()).run()"</pre>
+
+<p>会得到：</p>
+<pre>checkpoints/
+  n2n_model.pt          # 最终（20 min）
+  n2n_model_120s.pt     # 2 min 快照
+  n2n_model_300s.pt     # 5 min 快照
+  n2n_model_600s.pt     # 10 min 快照</pre>
+
+<p class="lead" style="margin-top: 40px; font-size: 12px;">基于 1 次 20 min 训练 + 4 个时间点的中间快照，对 7 场景 sensor2 ISO=16
+帧推理；每个 ROI 都使用每模型独立 gray-world 白平衡，色彩对齐。
+全部 23 个候选的实验数据见 <a href="EXPERIMENTS_JOURNEY.md">EXPERIMENTS_JOURNEY.md</a>。</p>
+
+</div>
+</body>
+</html>
