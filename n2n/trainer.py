@@ -15,7 +15,19 @@ from typing import Callable, List, Optional, Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
+import contextlib as _contextlib
+try:
+    from torch.amp import GradScaler, autocast  # PyTorch >= 2.4
+except ImportError:
+    from torch.cuda.amp import GradScaler, autocast as _autocast_old  # PyTorch < 2.4
+
+    @_contextlib.contextmanager
+    def autocast(device_type="cuda", enabled=True, dtype=None, cache_enabled=True):
+        kw = {"enabled": enabled, "cache_enabled": cache_enabled}
+        if dtype is not None:
+            kw["dtype"] = dtype
+        with _autocast_old(**kw):
+            yield
 from torch.utils.data import DataLoader
 
 from .dataset import BayerN2NDataset, find_raw_files
