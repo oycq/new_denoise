@@ -315,19 +315,79 @@ samples_per_epoch=1024 -> 170 step / epoch -> ~3.0 s / epoch
 
 ### 性能优化大事记
 
-性能从原始 ~34 sps 提升到 ~56 sps（+64%），关键步骤：
+性能从原始 ~34 sps 提升到 ~56 sps（+64%）。最终保留的优化（带「✓ 自动启用」的会
+根据当前设备自动开/关，不用改代码）：
 
-| 优化 | sps Δ | 说明 |
+| 优化 | 状态 | sps Δ | 说明 |
+|---|---|---|---|
+| 矢量化 N2N sampler（idx 替代 bool mask + argmax） | ✓ 永久启用 | +25% | `generate_index_pair` / `subimage_by_idx`，<br>常量 `idx_pairs` 跨步缓存 |
+| `channels_last` 内存布局 | ✓ 永久启用 | +21% | cuDNN 的 fp16/bf16 conv kernel 在 NHWC 下更快 |
+| GPU-resident 数据集（`GPUDataset`） | ✓ 自动启用 | +6%（2070） | 整个数据集 ~780 MB 常驻 GPU，crop+aug 在 GPU 上做。<br>`use_gpu_dataset=False` 走老 DataLoader 路径作为 fallback |
+| 融合 `channels_last` 到 `sample_batch` | ✓ 永久启用 | +4% | 直接产出 NHWC 张量，省一次 memcpy/step |
+| fused Adam (`fused=True`) | ✓ 自动启用 | +4% | CUDA 设备上自动开 |
+| 去掉 GradScaler 同步 | ✓ 自动选择 | +4% | bf16 永远不需要；fp16 由 `use_grad_scaler` 控制（默认 False，<br>L1+TV 在 [0, 1] 域不会 underflow 已验证） |
+| `cudnn.benchmark = True` | ✓ 自动启用 | (内置) | 自动 conv 算法选择 |
+| `tf32` 开关 | ✓ 自动启用 | Ampere+ 上 | Turing 上 no-op，Ampere+ 上 fp32 走 TF32 tensor core |
+
+### 为 Ampere+ 准备好的优化（自动检测设备）
+
+下面这些在 RTX 2070 / Windows 上无效或不可用，但代码已经写好，**上 4090 / A100
+等 Ampere+ GPU + Linux 时会自动启用**：
+
+| 优化 | 触发条件 | 4090 上的预期增益 |
 |---|---|---|
-| 矢量化 N2N sampler（去掉 bool→argmax round-trip） | +25% | `generate_index_pair` / `subimage_by_idx` 直接返回 idx |
-| `channels_last` 内存布局 | +21% | cuDNN 的 fp16 conv kernel 在 NHWC 下更快 |
-| GPU-resident 数据集（`GPUDataset`） | +6% | 整个数据集 ~780 MB 常驻 GPU，crop+aug 在 GPU 上做 |
-| fused Adam (`fused=True`) | +4% | 优化器更新合并到一个 CUDA kernel |
-| 融合 channels_last 到 sample_batch | +4% | 省一次 NCHW→NHWC memcpy/step |
-| 去掉 GradScaler 同步 (`use_grad_scaler=False`) | +4% | L1+TV loss 数值稳定，不需要 loss scaling，省一次 host 同步 |
-| `cudnn.benchmark = True` | (already) | 自动 conv 算法选择 |
-| `tf32` 开关 | (no-op) | RTX 2070 是 Turing，没 TF32；Ampere+ 上有 |
+| **bf16 autocast** 替代 fp16 | `cuda.get_device_capability().major >= 8`（Ampere+） | 与 fp16 持平，省掉 GradScaler，再消一个同步点 |
+| **`torch.compile(mode="reduce-overhead")`** | `import triton` 成功（Linux 默认装、Windows 无） | 4090 用户实测 +44% |
 
-**`torch.compile` / **`bf16`** 在 Windows + Turing 上不可用**（前者缺 Triton，后者无 tensor core）。
-4090 用户报告 `torch.compile` + `whole-step compile` 给了 +44% + +25%；如果迁
-移到 Linux + Ampere/Ada，可以再叠加 ~2× 速度。
+切换逻辑：
+
+```python
+# n2n/trainer.py
+def _autodetect_amp_dtype(device):
+    if device.type != "cuda": return None
+    return torch.bfloat16 if cuda.major >= 8 else torch.float16
+
+def _try_torch_compile(model):
+    try: import triton
+    except Exception: return model
+    return torch.compile(model, mode="reduce-overhead", dynamic=False)
+```
+
+启动时会打印：
+
+```
+[trainer] amp_dtype=torch.bfloat16  scaler=False             # 4090 / A100
+[trainer] torch.compile active (reduce-overhead)
+[trainer] amp_dtype=torch.float16   scaler=False             # 2070
+```
+
+### 实测吞吐（2 min 冒烟，本仓库 2026-04 sm_75 RTX 2070 上）
+
+```
+[trainer] GPUDataset: 140 frames, 744 MB on cuda
+[trainer] amp_dtype=torch.float16  scaler=False
+   ep=  5  step=  850  t=  15s  sps=60.1
+   ep= 10  step= 1700  t=  30s  sps=59.9
+   ep= 15  step= 2550  t=  44s  sps=58.0
+   ep= 20  step= 3400  t=  59s  sps=59.1
+   ep= 25  step= 4250  t=  73s  sps=58.2
+   ep= 30  step= 5100  t=  88s  sps=58.6
+   ep= 35  step= 5950  t= 102s  sps=59.0
+   ep= 40  step= 6800  t= 117s  sps=57.1
+
+steps/sec       : 55.7  (2 min avg, ~58-60 sps steady-state)
+epochs in 2 min : 42
+projected 20 min: 391 epochs (vs original 239)
+```
+
+### 删除的失败 / 微弱尝试
+
+* **`split_subimages` / `_to_cells`** —— 想通过共享 reshape 让 g1/g2 复用 cells，
+  实测 0% 收益（PyTorch 已经把 reshape 优化好了）。删除，trainer 直接调
+  `subimage_by_idx` 两次。
+* **`samples_per_epoch=2048`** —— 减少每 epoch 同步点，但破坏了 dev box 的
+  epoch-258 校准基准（journey 里的 epoch 数全要重算），收益又小（<1%），撤回。
+* **`torch.compile` 在 Windows 上** —— Triton 缺失，回到 eager。代码逻辑保留
+  并自动 fallback，迁 Linux 后可立即生效。
+* **bf16 autocast 在 Turing 上** —— bf16 没有 tensor core，回落到软件 fp32 路
+  径反而更慢。`_autodetect_amp_dtype` 自动选 fp16 规避此问题。

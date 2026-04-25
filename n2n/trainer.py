@@ -22,8 +22,52 @@ from .dataset import BayerN2NDataset, find_raw_files
 from .gpu_dataset import GPUDataset
 from .losses import get as get_loss
 from .model import UNet
-from .n2n_sampler import generate_index_pair, split_subimages, subimage_by_idx
+from .n2n_sampler import generate_index_pair, subimage_by_idx
 from .raw_utils import RAW_MAX, pack_rggb, read_raw
+
+
+# ---------------------------------------------------------------------------
+# Device-aware optimisation toggles. These are pure detection helpers so the
+# same TrainConfig can run optimally on a Turing 2070 (Windows) and on an
+# Ampere/Ada 4090 (Linux) without manual flags.
+# ---------------------------------------------------------------------------
+
+
+def _autodetect_amp_dtype(device: torch.device) -> Optional[torch.dtype]:
+    """Pick the best autocast dtype for the current GPU.
+
+    * Ampere or newer (sm_80+, includes 4090): bfloat16. Same dynamic range
+      as fp32, never under/overflows on small losses, and Ampere+ has
+      native bf16 tensor cores. Crucially this also lets us drop GradScaler
+      entirely (no inf/nan host-side check, no per-step sync).
+    * Turing (sm_75, e.g. RTX 2070): float16. fp16 tensor cores exist;
+      bf16 would fall back to a slow software path.
+    * CPU / older GPU: ``None`` (autocast disabled).
+    """
+    if device.type != "cuda":
+        return None
+    major, _ = torch.cuda.get_device_capability(device)
+    if major >= 8:
+        return torch.bfloat16
+    return torch.float16
+
+
+def _try_torch_compile(model: torch.nn.Module) -> torch.nn.Module:
+    """``torch.compile(model, mode='reduce-overhead')`` if available.
+
+    The inductor backend needs Triton, which isn't shipped on Windows; on
+    Linux + a recent CUDA toolkit it gives 1.3-1.5x on Ampere+. We probe
+    by trying to import the backend; on failure return the eager model.
+    """
+    try:
+        import triton  # noqa: F401  (presence test only)
+    except Exception:
+        return model
+    try:
+        return torch.compile(model, mode="reduce-overhead", dynamic=False)
+    except Exception as exc:
+        print(f"[trainer] torch.compile unavailable, using eager: {exc}")
+        return model
 
 
 @dataclass
@@ -74,9 +118,14 @@ class TrainConfig:
     # step, which silently inserts a CUDA sync. Our loss is L1 + lam*TV in
     # the [0, 1] image domain so gradients stay well within fp16 dynamic
     # range; disabling the scaler keeps fp16 forward/backward via autocast
-    # but removes the per-step sync. Revert to True if you ever change the
-    # loss family / scale.
+    # but removes the per-step sync. (When autocast picks bf16 we never
+    # need it anyway.) Revert to True if you change the loss family.
     use_grad_scaler: bool = False
+    # On Ampere+ GPUs, ``torch.compile(mode='reduce-overhead')`` captures
+    # the model into a CUDA graph and gives ~1.3-1.5x. Requires Triton,
+    # which isn't shipped on Windows; the trainer auto-detects and falls
+    # back to eager. Set False to force-disable.
+    use_torch_compile: bool = True
 
 
 @dataclass
@@ -254,10 +303,28 @@ class Trainer:
         cfg = self.cfg
         model, opt, loader, preview_t = self._build()
         device = preview_t.device
-        scaler = GradScaler(
-            "cuda",
-            enabled=(cfg.use_fp16 and cfg.use_grad_scaler and device.type == "cuda"),
+
+        # Pick the autocast dtype: bf16 on Ampere+ (no scaler ever needed),
+        # fp16 on Turing, none on CPU.
+        amp_dtype = _autodetect_amp_dtype(device) if cfg.use_fp16 else None
+        amp_enabled = amp_dtype is not None
+        # GradScaler is only meaningful for fp16; bf16 has fp32 dynamic range
+        # so it never under/overflows and we always skip it.
+        need_scaler = (
+            cfg.use_grad_scaler
+            and amp_dtype is torch.float16
+            and device.type == "cuda"
         )
+        scaler = GradScaler("cuda", enabled=need_scaler)
+        print(f"[trainer] amp_dtype={amp_dtype}  scaler={need_scaler}")
+
+        # Optional torch.compile for the model forward (Linux + Triton only).
+        if cfg.use_torch_compile:
+            model_compiled = _try_torch_compile(model)
+            if model_compiled is not model:
+                print("[trainer] torch.compile active (reduce-overhead)")
+        else:
+            model_compiled = model
         loss_base = get_loss(cfg.loss_name)
         if cfg.loss_kwargs:
             loss_kw = dict(cfg.loss_kwargs)
@@ -333,12 +400,15 @@ class Trainer:
                 # `idx1` / `idx2` are int64 per-cell indices (no boolean
                 # mask + argmax round-trip).
                 idx1, idx2 = generate_index_pair(batch)
-                # Build g1 and g2 from a single shared ``cells`` reshape -
-                # halves the per-step memcpy of the (N, C, H, W) batch.
-                g1, g2 = split_subimages(batch, idx1, idx2)
+                g1 = subimage_by_idx(batch, idx1)
+                g2 = subimage_by_idx(batch, idx2)
 
-                with autocast("cuda", enabled=cfg.use_fp16):
-                    pred_noise_g1 = model(g1)
+                with autocast(
+                    "cuda",
+                    enabled=amp_enabled,
+                    dtype=amp_dtype if amp_enabled else torch.float16,
+                ):
+                    pred_noise_g1 = model_compiled(g1)
                     den_g1 = g1 - pred_noise_g1
                     main = main_loss_fn(den_g1, g2)
 
@@ -346,7 +416,7 @@ class Trainer:
                         # N2N consistency regulariser (paper Eq.4). Skipped
                         # when lambda == 0 to halve the forward cost.
                         with torch.no_grad():
-                            full_noise = model(batch)
+                            full_noise = model_compiled(batch)
                             full_den = batch - full_noise
                             full_g1 = subimage_by_idx(full_den, idx1)
                             full_g2 = subimage_by_idx(full_den, idx2)
