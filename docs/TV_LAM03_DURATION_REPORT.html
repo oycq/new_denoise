@@ -86,15 +86,21 @@ intermediate ckpts saved at:
   600 s  (10 min)
  1200 s  (20 min, final)</pre>
 
+<p class="lead">每个 epoch = <code>samples_per_epoch / batch_size</code> = 1024 / 6 = <strong>170 step</strong>，
+意为「按数据集随机采样 170 mini-batch 后做一次 loss 汇报和中间预览」。</p>
+
 <table>
-  <thead><tr><th>时长</th><th class="num">epoch</th><th class="num">step</th><th class="num">main loss (=L1+0.03·TV)</th><th class="num">下降幅度 vs 2min</th></tr></thead>
+  <thead><tr><th>时长</th><th class="num">epoch</th><th class="num">step</th><th class="num">实际触发 t</th><th class="num">main loss (=L1+0.03·TV)</th><th class="num">下降幅度 vs 2min</th></tr></thead>
   <tbody>
-    <tr><td>2 min  (120 s)</td><td class="num">26</td><td class="num">~4 400</td><td class="num">0.01857</td><td class="num">—</td></tr>
-    <tr><td>5 min  (300 s)</td><td class="num">65</td><td class="num">~11 000</td><td class="num">0.01787</td><td class="num good">−3.8%</td></tr>
-    <tr><td>10 min (600 s)</td><td class="num">130</td><td class="num">~22 000</td><td class="num">0.01734</td><td class="num good">−6.6%</td></tr>
-    <tr class="row-best"><td><strong>20 min (1 200 s)</strong></td><td class="num">258</td><td class="num">43 793</td><td class="num"><strong>0.01662</strong></td><td class="num good"><strong>−10.5%</strong></td></tr>
+    <tr><td>2 min  (120 s)</td><td class="num">~26</td><td class="num">~4 400</td><td class="num">~123 s</td><td class="num">0.01857</td><td class="num">—</td></tr>
+    <tr><td>5 min  (300 s)</td><td class="num">~65</td><td class="num">~11 050</td><td class="num">302.0 s</td><td class="num">0.01787</td><td class="num good">−3.8%</td></tr>
+    <tr><td>10 min (600 s)</td><td class="num"><strong>130</strong></td><td class="num">22 100</td><td class="num">603.4 s</td><td class="num">0.01734</td><td class="num good">−6.6%</td></tr>
+    <tr class="row-best"><td><strong>20 min (1 200 s)</strong></td><td class="num"><strong>258</strong></td><td class="num">43 793</td><td class="num">1200.0 s</td><td class="num"><strong>0.01662</strong></td><td class="num good"><strong>−10.5%</strong></td></tr>
   </tbody>
 </table>
+
+<p class="lead">中间快照在 epoch 结束后触发，所以实际保存时刻略晚于设定的目标时间（例如目标 600 s
+触发于 ep=130 结束时的 t=603.4 s）。这保证保存的 ckpt 与 loss 曲线上的某个点完全对齐，不会停在 batch 中间。</p>
 
 <h2>② 20 ROI 视觉对比</h2>
 <p class="lead">同一图：<strong>NOISY → 2min → 5min → 10min → 20min</strong>，2× 最近邻放大。</p>

@@ -289,6 +289,25 @@ python evaluate_experiments.py
 | [`TV_LAMBDA_DURATION_REPORT.html`](TV_LAMBDA_DURATION_REPORT.html) | 4 λ × 2 时长汇总 | 时长 × λ 的 trade-off |
 | [`TV_20ROI_REPORT.html`](TV_20ROI_REPORT.html) | 7 场景 × 20 ROI 视觉判定 | 16/20 胜率给 λ=0.01 |
 
-需要再补一个：阶段 5 的 **「λ=0.03 训练 2/5/10/20 min」对比报告** 由
-`docs/TV_LAM03_DURATION_REPORT.html` 提供（一次 20-min 训练加 4 个
-中间 checkpoint）。
+阶段 5 的 **「λ=0.03 训练 2/5/10/20 min」对比报告** 已收录在
+[`TV_LAM03_DURATION_REPORT.html`](TV_LAM03_DURATION_REPORT.html)
+（一次 20-min 训练加 4 个中间 checkpoint）。
+
+### 训练吞吐量备忘
+
+```
+RTX 2070 + FP16 + cudnn benchmark
+patch=256 (packed) + batch=6 + UNet depth=3 base=48
+~36.4 step/s
+samples_per_epoch=1024 -> 170 step / epoch -> ~4.7 s / epoch
+
+时长       epoch    step       loss
+ 2 min       26     4 400      0.0186
+ 5 min       65    11 050      0.0179
+10 min      130    22 100      0.0173
+20 min      258    43 793      0.0166
+```
+
+如果换更小的 batch 或更大的 patch，先用 `python -c "from n2n.trainer
+import Trainer, TrainConfig; Trainer(TrainConfig(train_seconds=60)).run()"`
+跑一分钟看实际 sps，再据此估算所需训练时长。
