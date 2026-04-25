@@ -10,7 +10,7 @@ __pycache__/
 # Data, weights, results (large, regenerable, never committed) -------------
 # ---------------------------------------------------------------------------
 
-train_data/
+#train_data/
 checkpoints/
 result/
 
