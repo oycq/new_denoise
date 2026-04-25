@@ -224,32 +224,32 @@ TV(I) = mean( |I(x+1,y) − I(x,y)| ) + mean( |I(x,y+1) − I(x,y)| )</pre>
 <p class="muted">每张图从左到右：噪声原图 → baseline → λ=0.005 → 0.01 → 0.02 → 0.05。已 2× 最近邻放大。</p>
 
 <figure>
-  <img src="_eval/tv_sweep_corner_TL.png" alt="corner TL">
+  <img src="../experiments/_eval/tv_sweep_corner_TL.png" alt="corner TL">
   <figcaption><strong>左上角（暗噪重灾区，镜头阴影）</strong> · λ=0.005 几乎=baseline 仍可见颗粒；λ=0.01 干净并保留小亮点；λ=0.05 最干净但亮点被压扁、过渡塑料化。</figcaption>
 </figure>
 
 <figure>
-  <img src="_eval/tv_sweep_corner_TR.png" alt="corner TR">
+  <img src="../experiments/_eval/tv_sweep_corner_TR.png" alt="corner TR">
   <figcaption><strong>右上角（天空 + 暗角）</strong> · 都很干净，差别小；λ=0.005 仍有少量颗粒。</figcaption>
 </figure>
 
 <figure>
-  <img src="_eval/tv_sweep_ceiling.png" alt="ceiling">
+  <img src="../experiments/_eval/tv_sweep_ceiling.png" alt="ceiling">
   <figcaption><strong>天花板（大平面 + 接缝）</strong> · λ=0.005 残留低频块；<strong>λ=0.01 接缝最清晰且平面干净</strong>；λ=0.05 接缝被「擦」得偏弱。</figcaption>
 </figure>
 
 <figure>
-  <img src="_eval/tv_sweep_window.png" alt="window">
+  <img src="../experiments/_eval/tv_sweep_window.png" alt="window">
   <figcaption><strong>窗户栅栏（高频边缘）</strong> · 这是 TV 副作用最明显的区域。<strong>λ=0.005/0.01 栅栏锐</strong>；λ=0.02 栅栏开始变粗；<strong>λ=0.05 栅栏明显糊、变粗一圈</strong>。</figcaption>
 </figure>
 
 <figure>
-  <img src="_eval/tv_sweep_shrub.png" alt="shrub">
+  <img src="../experiments/_eval/tv_sweep_shrub.png" alt="shrub">
   <figcaption><strong>灌木 / 树枝（高频）</strong> · λ 越大树枝越软；λ=0.05 树枝边缘变虚；λ=0.01 几乎=baseline 但更干净。</figcaption>
 </figure>
 
 <figure>
-  <img src="_eval/tv_sweep_floor.png" alt="floor">
+  <img src="../experiments/_eval/tv_sweep_floor.png" alt="floor">
   <figcaption><strong>木地板（中频纹理）</strong> · 木纹细节是分水岭。λ=0.005 木纹清晰；λ=0.01 仍有完整木纹；λ=0.02 木纹略弱化；<strong>λ=0.05 木纹几乎消失，过塑料</strong>。</figcaption>
 </figure>
 

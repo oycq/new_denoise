@@ -133,7 +133,7 @@
 
 <figure id="roi01">
   <h4>#01 changqiao_qiaodi · 左上暗角（镜头阴影）<span class="cat shading">shading</span></h4>
-  <img src="_eval/rois_20/01_corner_TL_lens.png" alt="01">
+  <img src="../experiments/_eval/rois_20/01_corner_TL_lens.png" alt="01">
   <figcaption>极暗 + 强彩噪。baseline 已经清得不错但仍有底噪；
   <strong>所有 TV 候选都更干净</strong>，尤其 λ=0.05 几乎全平。
   小亮点（潜在地灯反光）所有候选都保留。<strong>赢家：所有 TV 都好于 baseline</strong>。</figcaption>
@@ -141,7 +141,7 @@
 
 <figure id="roi02">
   <h4>#02 changqiao_qiaodi · 桥底混凝土<span class="cat smooth">smooth</span></h4>
-  <img src="_eval/rois_20/02_ceiling_concrete.png" alt="02">
+  <img src="../experiments/_eval/rois_20/02_ceiling_concrete.png" alt="02">
   <figcaption>大平面，应该非常干净。
   baseline 仍有可见底噪；<strong>λ↑ 越平越干净</strong>，混凝土的细微纹理被逐步抹掉。
   λ=0.05 完全平。<strong>偏好取决于：是否需要保留混凝土材质感</strong>。</figcaption>
@@ -149,7 +149,7 @@
 
 <figure id="roi03">
   <h4>#03 changqiao_qiaodi · 建筑窗格<span class="cat grid">grid</span></h4>
-  <img src="_eval/rois_20/03_window_grid.png" alt="03">
+  <img src="../experiments/_eval/rois_20/03_window_grid.png" alt="03">
   <figcaption>垂直窗框（高对比黑白线）。
   baseline 框线清晰但伴随颗粒；λ=0.01 框线同样清晰且更干净；
   <strong>λ=0.05 框线开始变粗、对比度下降</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
@@ -157,7 +157,7 @@
 
 <figure id="roi04">
   <h4>#04 changqiao_qiaodi · 长椅木纹<span class="cat texture">texture</span></h4>
-  <img src="_eval/rois_20/04_bench_wood_grain.png" alt="04">
+  <img src="../experiments/_eval/rois_20/04_bench_wood_grain.png" alt="04">
   <figcaption>木纹是中频纹理 —— TV 杀手。
   baseline 木纹最清；λ=0.01 木纹仍可见；<strong>λ=0.05 木纹基本消失，板材像合成皮革</strong>。
   <strong>赢家：baseline / λ=0.01</strong>。</figcaption>
@@ -165,7 +165,7 @@
 
 <figure id="roi05">
   <h4>#05 langan_louti · 楼梯栏杆（高频）<span class="cat edges">edges</span></h4>
-  <img src="_eval/rois_20/05_railing_high_freq.png" alt="05">
+  <img src="../experiments/_eval/rois_20/05_railing_high_freq.png" alt="05">
   <figcaption>密集竖栏 —— 这是<strong>整套测试中最难的 ROI</strong>。
   baseline 栏杆清晰但带噪；λ=0.01 几乎相同清晰度但更干净；
   λ=0.02 栏杆开始变粗；<strong>λ=0.05 栏杆糊得明显，间距感减弱</strong>。
@@ -174,7 +174,7 @@
 
 <figure id="roi06">
   <h4>#06 langan_louti · 天空（大平面）<span class="cat smooth">smooth</span></h4>
-  <img src="_eval/rois_20/06_sky_smooth_flat.png" alt="06">
+  <img src="../experiments/_eval/rois_20/06_sky_smooth_flat.png" alt="06">
   <figcaption>天空蓝灰渐变，理想情况应非常平滑。
   baseline 在这种纯平面区域已经很干净；λ↑ 进一步消除残余颗粒。
   差异小。<strong>赢家：大同小异，λ↑ 略好</strong>。</figcaption>
@@ -182,7 +182,7 @@
 
 <figure id="roi07">
   <h4>#07 langan_louti · 玻璃塔楼网格<span class="cat grid">grid</span></h4>
-  <img src="_eval/rois_20/07_glass_tower_grid.png" alt="07">
+  <img src="../experiments/_eval/rois_20/07_glass_tower_grid.png" alt="07">
   <figcaption>玻璃幕墙的反射 + 细窗格。
   baseline 反射细节清晰但有噪；λ=0.01 平衡好；
   λ=0.05 玻璃反射被「擦」掉了，窗格也糊。<strong>赢家：λ=0.01 或 baseline</strong>。</figcaption>
@@ -190,7 +190,7 @@
 
 <figure id="roi08">
   <h4>#08 louti_shumu_caoguan · 树枝密集<span class="cat foliage">foliage</span></h4>
-  <img src="_eval/rois_20/08_tree_branches.png" alt="08">
+  <img src="../experiments/_eval/rois_20/08_tree_branches.png" alt="08">
   <figcaption>密集树叶（高频随机）。
   baseline 叶片个体可分辨；λ=0.01 仍可分辨且更干净；
   <strong>λ=0.05 叶片融成一团</strong>，「鬼影感」明显。<strong>赢家：λ=0.01</strong>。</figcaption>
@@ -198,7 +198,7 @@
 
 <figure id="roi09">
   <h4>#09 louti_shumu_caoguan · 砖路图案<span class="cat pattern">pattern</span></h4>
-  <img src="_eval/rois_20/09_brick_pavement.png" alt="09">
+  <img src="../experiments/_eval/rois_20/09_brick_pavement.png" alt="09">
   <figcaption>规则砖块图案（中频）。
   baseline 砖缝清晰；λ=0.01 同样可见且更干净；
   λ=0.02 砖缝开始模糊；<strong>λ=0.05 砖缝几乎消失，路面像柏油</strong>。
@@ -207,7 +207,7 @@
 
 <figure id="roi10">
   <h4>#10 louti_shumu_caoguan · 灌木叶丛<span class="cat foliage">foliage</span></h4>
-  <img src="_eval/rois_20/10_dense_shrubs.png" alt="10">
+  <img src="../experiments/_eval/rois_20/10_dense_shrubs.png" alt="10">
   <figcaption>密集灌木叶（最高频）。
   baseline 叶尖锐利；λ=0.01 仍保留叶片轮廓；
   <strong>λ=0.05 叶片融成一片绿团</strong>。<strong>赢家：baseline / λ=0.01</strong>。</figcaption>
@@ -215,7 +215,7 @@
 
 <figure id="roi11">
   <h4>#11 qiang_qiaodi · 极暗角（高 ISO 死区）<span class="cat shading">shading</span></h4>
-  <img src="_eval/rois_20/11_corner_BR_dark.png" alt="11">
+  <img src="../experiments/_eval/rois_20/11_corner_BR_dark.png" alt="11">
   <figcaption>桥下暗角，几乎全黑 + 强烈彩噪。
   baseline 已经大幅清噪；TV 候选在这里都进一步压扁底噪。
   <strong>所有 TV 候选都明显好于 baseline</strong>，λ=0.05 最干净但底部水泥纹理消失。
@@ -224,7 +224,7 @@
 
 <figure id="roi12">
   <h4>#12 qiang_qiaodi · 白墙大平面<span class="cat smooth">smooth</span></h4>
-  <img src="_eval/rois_20/12_wall_white_smooth.png" alt="12">
+  <img src="../experiments/_eval/rois_20/12_wall_white_smooth.png" alt="12">
   <figcaption>大块白墙，理想应纯平。
   baseline 仍有亚像素颗粒；λ=0.01 干净；
   λ=0.05 完全均匀。<strong>赢家：λ=0.05 在纯平面胜出</strong>。</figcaption>
@@ -232,7 +232,7 @@
 
 <figure id="roi13">
   <h4>#13 qiang_qiaodi · 桥曲面<span class="cat smooth">smooth</span></h4>
-  <img src="_eval/rois_20/13_bridge_curve.png" alt="13">
+  <img src="../experiments/_eval/rois_20/13_bridge_curve.png" alt="13">
   <figcaption>白色弧形桥底（光滑曲面 + 软高光）。
   baseline 曲面清晰但带颗粒；λ↑ 越平。
   λ=0.05 曲面最平但与 λ=0.02 差别小。<strong>赢家：λ=0.02 或 λ=0.05</strong>。</figcaption>
@@ -240,7 +240,7 @@
 
 <figure id="roi14">
   <h4>#14 shumu_guanmu_che · 自行车密堆<span class="cat complex">complex</span></h4>
-  <img src="_eval/rois_20/14_bicycle_cluster.png" alt="14">
+  <img src="../experiments/_eval/rois_20/14_bicycle_cluster.png" alt="14">
   <figcaption>极复杂场景，机械金属边缘 + 阴影 + 多色塑料外壳。
   baseline 单车细节最丰富但噪；λ=0.01 平衡 —— 边缘锐 + 噪降；
   <strong>λ=0.05 单车融成抽象色块</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
@@ -248,7 +248,7 @@
 
 <figure id="roi15">
   <h4>#15 shumu_guanmu_che · 写字楼百叶窗<span class="cat grid">grid</span></h4>
-  <img src="_eval/rois_20/15_tower_blinds_vert.png" alt="15">
+  <img src="../experiments/_eval/rois_20/15_tower_blinds_vert.png" alt="15">
   <figcaption>密集垂直百叶窗 —— 高频测试。
   baseline 百叶清晰但带噪；λ=0.01 同清晰且更净；
   λ=0.02 百叶略变粗；<strong>λ=0.05 百叶糊明显</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
@@ -256,7 +256,7 @@
 
 <figure id="roi16">
   <h4>#16 shumu_guanmu_che · 树干树皮纹理<span class="cat texture">texture</span></h4>
-  <img src="_eval/rois_20/16_tree_trunk_dark.png" alt="16">
+  <img src="../experiments/_eval/rois_20/16_tree_trunk_dark.png" alt="16">
   <figcaption>树干 + 粗糙树皮（中频随机纹理）。
   baseline 树皮纹理清晰；λ=0.01 仍可见；
   <strong>λ=0.05 树皮变成均匀深褐色塑料</strong>。<strong>赢家：baseline / λ=0.01</strong>。</figcaption>
@@ -264,7 +264,7 @@
 
 <figure id="roi17">
   <h4>#17 shumu_langan · 玻璃幕墙反射<span class="cat specular">specular</span></h4>
-  <img src="_eval/rois_20/17_glass_facade.png" alt="17">
+  <img src="../experiments/_eval/rois_20/17_glass_facade.png" alt="17">
   <figcaption>玻璃幕墙的弱反射 + 接缝。
   baseline 反射细节最丰富但带噪；λ=0.01 反射保留 + 干净；
   <strong>λ=0.05 反射几乎被消除，玻璃变成纯灰色</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
@@ -272,7 +272,7 @@
 
 <figure id="roi18">
   <h4>#18 shumu_langan · 灌木丛纹理<span class="cat foliage">foliage</span></h4>
-  <img src="_eval/rois_20/18_hedge_texture.png" alt="18">
+  <img src="../experiments/_eval/rois_20/18_hedge_texture.png" alt="18">
   <figcaption>密集灌木（中低频纹理）。
   baseline 叶片有噪点但有质感；λ=0.01 干净 + 保留质感；
   λ=0.05 灌木丛失去层次。<strong>赢家：λ=0.01</strong>。</figcaption>
@@ -280,7 +280,7 @@
 
 <figure id="roi19">
   <h4>#19 zixingche_shumu_jiedao · 自行车辐条（最细高频）<span class="cat edges">edges</span></h4>
-  <img src="_eval/rois_20/19_bicycle_spokes.png" alt="19">
+  <img src="../experiments/_eval/rois_20/19_bicycle_spokes.png" alt="19">
   <figcaption>自行车辐条 —— 整套测试中<strong>最细的边缘</strong>。
   baseline 辐条最锐但伴噪；λ=0.01 辐条仍可见但略软；
   <strong>λ=0.05 辐条几乎消失</strong>。<strong>赢家：baseline 或 λ=0.01</strong>。</figcaption>
@@ -288,7 +288,7 @@
 
 <figure id="roi20">
   <h4>#20 zixingche_shumu_jiedao · 沿街店铺招牌<span class="cat complex">complex</span></h4>
-  <img src="_eval/rois_20/20_shop_signs.png" alt="20">
+  <img src="../experiments/_eval/rois_20/20_shop_signs.png" alt="20">
   <figcaption>店铺玻璃 + 文字招牌（混合高低频 + 文字 OCR 测试）。
   baseline 文字最清晰但带噪；λ=0.01 文字可读 + 干净；
   <strong>λ=0.05 文字模糊到难以识别</strong>。<strong>赢家：λ=0.01</strong>。</figcaption>
