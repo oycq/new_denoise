@@ -26,45 +26,55 @@ class _DoubleConv(nn.Module):
 
 
 class UNet(nn.Module):
-    """Shallow encoder-decoder with skip connections, residual output.
+    """Configurable-depth encoder-decoder with skip connections, residual head.
 
-    Depth 3 (3x max-pool, 8x total spatial reduction) keeps the receptive
-    field local enough for small training patches, which avoids the smooth
-    "blob"-shaped residuals that a deeper UNet tends to produce on
-    textureless regions when trained with a single L1 loss.
+    ``depth=3`` (default) gives the local-feature small UNet that avoided
+    "blob"-shaped low-freq residuals at small training patches; ``depth=4``
+    is the standard N2N config which works fine when the patch is large
+    enough (e.g. 256+).
     """
 
-    def __init__(self, in_ch: int = 4, out_ch: int = 4, base: int = 48):
+    def __init__(
+        self,
+        in_ch: int = 4,
+        out_ch: int = 4,
+        base: int = 48,
+        depth: int = 3,
+    ):
         super().__init__()
-        self.enc1 = _DoubleConv(in_ch, base)
-        self.enc2 = _DoubleConv(base, base * 2)
-        self.enc3 = _DoubleConv(base * 2, base * 4)
-        self.bottleneck = _DoubleConv(base * 4, base * 4)
+        if depth < 2 or depth > 5:
+            raise ValueError(f"depth must be in [2, 5], got {depth}")
+        self.depth = depth
+        chs = [base * (2 ** i) for i in range(depth)]   # e.g. depth=3 -> [B, 2B, 4B]
+        chs.append(chs[-1])  # bottleneck width = deepest enc width
 
-        self.up3 = nn.ConvTranspose2d(base * 4, base * 4, 2, stride=2)
-        self.dec3 = _DoubleConv(base * 8, base * 2)
-        self.up2 = nn.ConvTranspose2d(base * 2, base * 2, 2, stride=2)
-        self.dec2 = _DoubleConv(base * 4, base)
-        self.up1 = nn.ConvTranspose2d(base, base, 2, stride=2)
-        self.dec1 = _DoubleConv(base * 2, base)
+        self.encs = nn.ModuleList(
+            [_DoubleConv(in_ch if i == 0 else chs[i - 1], chs[i]) for i in range(depth)]
+        )
+        self.bottleneck = _DoubleConv(chs[depth - 1], chs[depth])
+
+        self.ups = nn.ModuleList()
+        self.decs = nn.ModuleList()
+        for i in reversed(range(depth)):
+            in_up = chs[i + 1] if i == depth - 1 else chs[i + 1]
+            self.ups.append(nn.ConvTranspose2d(in_up, in_up, 2, stride=2))
+            self.decs.append(_DoubleConv(in_up + chs[i], chs[i] if i > 0 else base))
 
         self.out_conv = nn.Conv2d(base, out_ch, 1)
-
-        # Initialise the residual head near zero so early training is stable.
+        # Residual head near zero -> network starts as identity.
         nn.init.zeros_(self.out_conv.weight)
         nn.init.zeros_(self.out_conv.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        e1 = self.enc1(x)
-        e2 = self.enc2(F.max_pool2d(e1, 2))
-        e3 = self.enc3(F.max_pool2d(e2, 2))
-        b = self.bottleneck(F.max_pool2d(e3, 2))
-
-        d3 = self.dec3(torch.cat([self.up3(b), e3], dim=1))
-        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
-        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
-        return self.out_conv(d1)  # residual noise estimate
+        skips = []
+        cur = x
+        for i, enc in enumerate(self.encs):
+            cur = enc(cur if i == 0 else F.max_pool2d(cur, 2))
+            skips.append(cur)
+        cur = self.bottleneck(F.max_pool2d(cur, 2))
+        for up, dec, skip in zip(self.ups, self.decs, reversed(skips)):
+            cur = dec(torch.cat([up(cur), skip], dim=1))
+        return self.out_conv(cur)
 
     def denoise(self, x: torch.Tensor) -> torch.Tensor:
-        """Convenience: subtract predicted noise from input."""
         return x - self.forward(x)

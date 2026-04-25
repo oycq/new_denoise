@@ -5,3 +5,5 @@ checkpoints/
 result/
 tmp_*
 *.log
+experiments/*/model.pt
+experiments_*.log

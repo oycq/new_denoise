@@ -19,6 +19,7 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 from .dataset import BayerN2NDataset, find_raw_files
+from .losses import get as get_loss
 from .model import UNet
 from .n2n_sampler import generate_mask_pair, generate_subimages
 from .raw_utils import RAW_MAX, pack_rggb, read_raw
@@ -27,9 +28,13 @@ from .raw_utils import RAW_MAX, pack_rggb, read_raw
 @dataclass
 class TrainConfig:
     data_root: str = "train_data/Data"
-    patch_size: int = 192         # in packed-pixel units (=> 384 in Bayer)
-    batch_size: int = 8
+    # Defaults reflect the winning strategy from `experiments/REPORT.md`:
+    # Multi-scale Charbonnier (4 scales) + patch 256 - best blob suppression
+    # AND best edge preservation among 16 tested strategies.
+    patch_size: int = 256         # in packed-pixel units (=> 512 in Bayer)
+    batch_size: int = 6
     base_channels: int = 48
+    unet_depth: int = 3           # 3 = local-feature (default), 4 = standard N2N
     lr: float = 2e-4
     samples_per_epoch: int = 1024
     num_workers: int = 0          # Windows + small data: 0 is faster
@@ -44,6 +49,16 @@ class TrainConfig:
     seed: int = 1234
     ckpt_path: str = "checkpoints/n2n_model.pt"
     train_seconds: float = 600.0  # wall-clock budget
+    # Name of the main loss function used for the N2N main term, looked up
+    # in ``n2n.losses.REGISTRY``. The reg term (when n2n_lambda > 0) always
+    # uses plain L1 for stability.
+    loss_name: str = "ms_l1_charbonnier"
+    # Optional kwargs for the loss (e.g. multiscale_l1 scales=4).
+    loss_kwargs: dict = field(default_factory=lambda: {"scales": 4})
+    # If True, subtract ~9 (in 0-255 domain, equivalently 2304/65535 normalised)
+    # from input before feeding to the model. Centres the input near zero,
+    # may improve fp16 numerics.
+    subtract_black_level: bool = False
 
 
 @dataclass
@@ -116,7 +131,10 @@ class Trainer:
             drop_last=True,
         )
 
-        model = UNet(in_ch=4, out_ch=4, base=self.cfg.base_channels).to(device)
+        model = UNet(
+            in_ch=4, out_ch=4,
+            base=self.cfg.base_channels, depth=self.cfg.unet_depth,
+        ).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=self.cfg.lr)
 
         # The preview is the most informative when taken from the noisiest ISO:
@@ -158,11 +176,16 @@ class Trainer:
             return
         model.eval()
         with torch.no_grad():
+            inp = preview_t
+            if self.cfg.subtract_black_level:
+                inp = inp - (9.0 * 256.0 / RAW_MAX)
             with autocast("cuda", enabled=self.cfg.use_fp16):
-                denoised = model.denoise(preview_t)
-        denoised = denoised.float().clamp(0, 1)
+                den = model.denoise(inp)
+            if self.cfg.subtract_black_level:
+                den = den + (9.0 * 256.0 / RAW_MAX)
+        den = den.float().clamp(0, 1)
         noisy_np = preview_t[0].float().cpu().numpy().transpose(1, 2, 0)
-        den_np = denoised[0].cpu().numpy().transpose(1, 2, 0)
+        den_np = den[0].cpu().numpy().transpose(1, 2, 0)
         self.on_preview(
             PreviewInfo(
                 step=step, epoch=epoch, noisy_packed=noisy_np, denoised_packed=den_np
@@ -176,6 +199,19 @@ class Trainer:
         model, opt, loader, preview_t = self._build()
         device = preview_t.device
         scaler = GradScaler("cuda", enabled=cfg.use_fp16 and device.type == "cuda")
+        loss_base = get_loss(cfg.loss_name)
+        if cfg.loss_kwargs:
+            loss_kw = dict(cfg.loss_kwargs)
+            def main_loss_fn(d, t, _f=loss_base, _kw=loss_kw):
+                return _f(d, t, **_kw)
+        else:
+            main_loss_fn = loss_base
+
+        # Optional zero-mean preprocessing: subtract a constant equal to the
+        # 8-bit black-level scaled into the [0, 1] input domain.
+        bl_norm = 0.0
+        if cfg.subtract_black_level:
+            bl_norm = 9.0 * 256.0 / RAW_MAX  # ~0.0352
 
         Path(cfg.ckpt_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -208,6 +244,8 @@ class Trainer:
                     break
 
                 batch = batch.to(device, non_blocking=True)
+                if bl_norm > 0:
+                    batch = batch - bl_norm
 
                 # Mask sampling does no benefit from autocast and only adds
                 # int<->half overhead; keep it in fp32 outside autocast.
@@ -218,7 +256,7 @@ class Trainer:
                 with autocast("cuda", enabled=cfg.use_fp16):
                     pred_noise_g1 = model(g1)
                     den_g1 = g1 - pred_noise_g1
-                    main = F.l1_loss(den_g1, g2)
+                    main = main_loss_fn(den_g1, g2)
 
                     if cfg.n2n_lambda > 0:
                         # N2N consistency regulariser (paper Eq.4). Skipped

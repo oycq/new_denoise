@@ -36,7 +36,8 @@ def load_model(ckpt_path: str | Path, device: torch.device) -> tuple[UNet, dict]
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ckpt.get("config", {})
     base = cfg.get("base_channels", 48)
-    model = UNet(in_ch=4, out_ch=4, base=base).to(device).eval()
+    depth = cfg.get("unet_depth", 3)
+    model = UNet(in_ch=4, out_ch=4, base=base, depth=depth).to(device).eval()
     model.load_state_dict(ckpt["model"])
     return model, cfg
 
@@ -49,6 +50,7 @@ def denoise_full_raw(
     use_fp16: bool = True,
     tile: int = 512,
     overlap: int = 32,
+    subtract_black_level: bool = False,
 ) -> np.ndarray:
     """Run the model on a full raw frame using overlapping tiles in 4-ch space.
 
@@ -58,6 +60,7 @@ def denoise_full_raw(
     norm = raw_uint16.astype(np.float32) / RAW_MAX
     packed = pack_rggb(norm).transpose(2, 0, 1)  # (4, H/2, W/2)
     _, h, w = packed.shape
+    bl = (9.0 * 256.0 / RAW_MAX) if subtract_black_level else 0.0
 
     out = np.zeros_like(packed, dtype=np.float32)
     weight = np.zeros((1, h, w), dtype=np.float32)
@@ -74,8 +77,12 @@ def denoise_full_raw(
             x1 = min(w, x0 + tile)
             patch = packed[:, y0:y1, x0:x1]
             t = torch.from_numpy(patch).unsqueeze(0).to(device)
+            if bl > 0:
+                t = t - bl
             with autocast("cuda", enabled=use_fp16):
                 pred = model.denoise(t)
+            if bl > 0:
+                pred = pred + bl
             pred = pred.float().clamp(0, 1).squeeze(0).cpu().numpy()
 
             ph, pw = pred.shape[1], pred.shape[2]
