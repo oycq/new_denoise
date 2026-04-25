@@ -144,6 +144,42 @@ def default_strategies() -> list[Strategy]:
                 "patch_size": 256, "batch_size": 4, "unet_depth": 4,
             },
         ),
+        # ---- TV lambda sweep (refines strategy 13) ----
+        Strategy(
+            name="13b_l1_plus_tv_lam02",
+            description="L1 + 0.02 * TV - moderate piecewise smoothing.",
+            overrides={"loss_name": "l1_plus_tv", "loss_kwargs": {"lam": 0.02}},
+        ),
+        Strategy(
+            name="13c_l1_plus_tv_lam01",
+            description="L1 + 0.01 * TV - mild piecewise smoothing.",
+            overrides={"loss_name": "l1_plus_tv", "loss_kwargs": {"lam": 0.01}},
+        ),
+        Strategy(
+            name="13d_l1_plus_tv_lam005",
+            description="L1 + 0.005 * TV - very light TV touch.",
+            overrides={"loss_name": "l1_plus_tv", "loss_kwargs": {"lam": 0.005}},
+        ),
+        Strategy(
+            name="13c_l1_plus_tv_lam01_10min",
+            description="L1 + 0.01 * TV - same as 13c but trained twice as long.",
+            overrides={"loss_name": "l1_plus_tv", "loss_kwargs": {"lam": 0.01}},
+        ),
+        Strategy(
+            name="13b_l1_plus_tv_lam02_10min",
+            description="L1 + 0.02 * TV - same as 13b but 10-min training.",
+            overrides={"loss_name": "l1_plus_tv", "loss_kwargs": {"lam": 0.02}},
+        ),
+        Strategy(
+            name="13_l1_plus_tv_lam05_10min",
+            description="L1 + 0.05 * TV - same as 13 but 10-min training.",
+            overrides={"loss_name": "l1_plus_tv", "loss_kwargs": {"lam": 0.05}},
+        ),
+        Strategy(
+            name="00_baseline_l1_v2",
+            description="Fresh L1 baseline with current arch (depth=3 patch=256 batch=6).",
+            overrides={"loss_name": "l1", "loss_kwargs": {}},
+        ),
     ]
 
 

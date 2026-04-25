@@ -28,9 +28,13 @@ from .raw_utils import RAW_MAX, pack_rggb, read_raw
 @dataclass
 class TrainConfig:
     data_root: str = "train_data/Data"
-    # Defaults reflect the winning strategy from `experiments/REPORT.md`:
-    # Multi-scale Charbonnier (4 scales) + patch 256 - best blob suppression
-    # AND best edge preservation among 16 tested strategies.
+    # Defaults reflect the user-preferred strategy after a 4-point TV-lambda
+    # sweep on top of `experiments/REPORT.md`:
+    #   L1 + 0.01 * Total-Variation
+    # gives blob 0.98 (vs baseline 1.01) AND edge sharpness 17.26 (vs
+    # baseline 17.97) - corners stay clean without the textural over-
+    # smoothing seen at lam=0.05 (railings, wood grain). See
+    # `experiments/_eval/tv_sweep_*.png` for the visual comparison.
     patch_size: int = 256         # in packed-pixel units (=> 512 in Bayer)
     batch_size: int = 6
     base_channels: int = 48
@@ -52,9 +56,9 @@ class TrainConfig:
     # Name of the main loss function used for the N2N main term, looked up
     # in ``n2n.losses.REGISTRY``. The reg term (when n2n_lambda > 0) always
     # uses plain L1 for stability.
-    loss_name: str = "ms_l1_charbonnier"
-    # Optional kwargs for the loss (e.g. multiscale_l1 scales=4).
-    loss_kwargs: dict = field(default_factory=lambda: {"scales": 4})
+    loss_name: str = "l1_plus_tv"
+    # Optional kwargs for the loss (e.g. multiscale_l1 scales=4, l1_plus_tv lam=0.01).
+    loss_kwargs: dict = field(default_factory=lambda: {"lam": 0.01})
     # If True, subtract ~9 (in 0-255 domain, equivalently 2304/65535 normalised)
     # from input before feeding to the model. Centres the input near zero,
     # may improve fp16 numerics.
