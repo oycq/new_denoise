@@ -24,8 +24,8 @@ result_*/
 _archive_local/
 
 # ---------------------------------------------------------------------------
-# `train_vgg.py` writes ckpts and per-candidate stdout logs here. The
-# directory is regenerable, so it stays out of git.
+# Auxiliary ckpt directory used by ad-hoc / experimental training scripts.
+# The directory is regenerable, so it stays out of git.
 # ---------------------------------------------------------------------------
 ckpts/
 

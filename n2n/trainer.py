@@ -1,21 +1,29 @@
 """Training loop for Neighbor2Neighbor Bayer denoising.
 
+Loss is fixed to ``L1(den, g2) + lam_vgg * VGG_perceptual(den, g2)``.
+That is the only configuration the project ships after the experiments
+documented in ``docs/EXPERIMENTS_JOURNEY.md``: every other variant
+(L1+TV, EATV, luma/chroma split, EMA self-distill, R2R, masking,
+sub-pixel jitter, …) was either no improvement or just made the step
+slower without measurable visual gain.
+
 The :class:`Trainer` is designed to be driven by a GUI: it exposes
-callbacks that fire after every step (loss, progress) and after every
-``preview_every`` steps (a 64x64 RGGB preview of noisy vs denoised). It
+callbacks that fire after every epoch (mean L1 / VGG / total) and after
+every preview interval (a 64x64 RGGB preview of noisy vs denoised). It
 also stops automatically once a wall-clock budget is reached.
 """
 from __future__ import annotations
 
+import contextlib as _contextlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, List, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import contextlib as _contextlib
+
 try:
     from torch.amp import GradScaler, autocast  # PyTorch >= 2.4
 except ImportError:
@@ -32,7 +40,7 @@ from torch.utils.data import DataLoader
 
 from .dataset import BayerN2NDataset, find_raw_files
 from .gpu_dataset import GPUDataset
-from .losses import get as get_loss
+from .losses_perceptual import vgg_perceptual_loss
 from .model import UNet
 from .n2n_sampler import generate_index_pair, subimage_by_idx
 from .raw_utils import RAW_MAX, pack_rggb, read_raw
@@ -85,15 +93,10 @@ def _try_torch_compile(model: torch.nn.Module) -> torch.nn.Module:
 @dataclass
 class TrainConfig:
     data_root: str = "train_data/Data"
-    # Final locked-in configuration after the experiments documented in
-    # `docs/EXPERIMENTS_JOURNEY.md`:
-    #     loss = L1 + 0.03 * Total-Variation
-    # This is the only learnable knob. The 4-point TV-lambda sweep
-    # (lam in {0.005, 0.01, 0.02, 0.05}) showed lam=0.01 was the best of
-    # those four; visual evaluation across 7 scenes / 20 ROIs suggested a
-    # slightly stronger TV (lam ~ 0.02-0.03) is preferable for the
-    # lens-shading corners while still preserving fine textures, so 0.03
-    # was chosen as the final coefficient.
+    # Loss is fixed to L1 + lam_vgg * VGG (see module docstring). The
+    # only knob is the VGG weight; 0.05 was the value that consistently
+    # cleaned up "blotchy" residual noise without over-smoothing.
+    lam_vgg: float = 0.05
     patch_size: int = 256         # in packed-pixel units (=> 512 in Bayer)
     batch_size: int = 6
     base_channels: int = 48
@@ -106,32 +109,24 @@ class TrainConfig:
     num_workers: int = 4
     # GPU-resident dataset: load every packed RGGB frame onto the GPU at
     # init and do random crop + per-item flip/transpose entirely on the
-    # GPU. Removes the CPU H2D copy + DataLoader bottleneck. ~780 MB of
-    # extra GPU memory for the full 140-frame training set, which still
-    # comfortably fits an 8 GB card.
+    # GPU. Removes the CPU H2D copy + DataLoader bottleneck.
     use_gpu_dataset: bool = True
     use_fp16: bool = True
-    n2n_lambda: float = 0.0       # N2N consistency reg (paper Eq.4); 0 = pure L1+TV main
     preview_size: int = 64        # patch size in packed-pixel units
     preview_iso_dir: str = "16"   # subdirectory name for the noisiest ISO
     seed: int = 1234
     ckpt_path: str = "checkpoints/n2n_model.pt"
     train_seconds: float = 1200.0  # wall-clock budget (default 20 min)
-    # The single learnable configuration: L1 + 0.03 * TV.
-    loss_name: str = "l1_plus_tv"
-    loss_kwargs: dict = field(default_factory=lambda: {"lam": 0.03})
-    subtract_black_level: bool = False
     # Optional intermediate checkpoint times (seconds). When any of these
     # is crossed, a snapshot is written next to ``ckpt_path`` with a
     # ``_<seconds>s`` suffix, so a single 20-min run yields multiple
     # comparable checkpoints (e.g. 2/5/10/20 min).
     intermediate_save_seconds: tuple = (120.0, 300.0, 600.0)
     # GradScaler does an inf/nan check + host-side skip decision on every
-    # step, which silently inserts a CUDA sync. Our loss is L1 + lam*TV in
-    # the [0, 1] image domain so gradients stay well within fp16 dynamic
-    # range; disabling the scaler keeps fp16 forward/backward via autocast
-    # but removes the per-step sync. (When autocast picks bf16 we never
-    # need it anyway.) Revert to True if you change the loss family.
+    # step, which silently inserts a CUDA sync. With L1 + VGG in [0, 1]
+    # gradients stay well within fp16 dynamic range; disabling the scaler
+    # keeps fp16 forward/backward via autocast but removes the per-step
+    # sync. (When autocast picks bf16 we never need it anyway.)
     use_grad_scaler: bool = False
     # On Ampere+ GPUs, ``torch.compile(mode='reduce-overhead')`` captures
     # the model into a CUDA graph and gives ~1.3-1.5x. Requires Triton,
@@ -154,12 +149,12 @@ class TrainConfig:
 
 @dataclass
 class StepInfo:
-    """One emission *per epoch* (mean loss, plus progress info)."""
+    """One emission *per epoch* (mean loss components, plus progress info)."""
     step: int        # global step count at end of this epoch
     epoch: int
-    loss: float      # mean total loss across the epoch (main + lambda * reg)
-    main_loss: float # mean L1 main term (the actual denoising error - noise floor)
-    reg_loss: float  # mean L1 regulariser (consistency); ramps from 0 over training
+    loss: float      # mean total loss (L1 + lam_vgg * VGG) across the epoch
+    l1_loss: float   # mean plain-L1 component (the denoising error - noise floor)
+    vgg_loss: float  # mean VGG perceptual L1 (raw, before lam_vgg scaling)
     elapsed: float
     progress: float  # in [0, 1]
     steps_per_sec: float
@@ -175,7 +170,7 @@ class PreviewInfo:
 
 @dataclass
 class TrainState:
-    losses: List[float] = field(default_factory=list)  # per-epoch mean losses
+    losses: List[float] = field(default_factory=list)  # per-epoch mean total losses
     epochs: List[int] = field(default_factory=list)
 
 
@@ -223,9 +218,6 @@ class Trainer:
             )
 
         if self.cfg.use_gpu_dataset and device.type == "cuda":
-            # Hand the dataset our preferred memory format so it can fuse
-            # the channels_last conversion into the final stack (saves one
-            # NCHW -> NHWC memcpy per step).
             mem_fmt = (
                 torch.channels_last
                 if self.cfg.use_channels_last
@@ -257,22 +249,15 @@ class Trainer:
             in_ch=4, out_ch=4,
             base=self.cfg.base_channels, depth=self.cfg.unet_depth,
         ).to(device)
-        # NHWC ("channels-last") layout. cuDNN's fp16 conv kernels prefer
-        # this layout; with mixed precision it can give 1.1-1.3x on
-        # Turing+ GPUs at the cost of input batches needing the same
-        # memory layout (handled in the training loop).
         if device.type == "cuda" and self.cfg.use_channels_last:
             model = model.to(memory_format=torch.channels_last)
-        # `fused=True` runs Adam's elementwise update in a single CUDA
-        # kernel instead of dispatching ~5 ops per parameter tensor. With
-        # 28 conv weight + bias tensors that's a non-trivial saving.
         adam_kwargs = dict(lr=self.cfg.lr)
         if device.type == "cuda" and self.cfg.use_fused_adam:
             adam_kwargs["fused"] = True
         opt = torch.optim.Adam(model.parameters(), **adam_kwargs)
 
-        # The preview is the most informative when taken from the noisiest ISO:
-        # we look for `<data_root>/<scene>/<preview_iso_dir>/sensorN_raw.png`.
+        # Preview is taken from the noisiest ISO, so visual quality is
+        # tracked on the hardest case: ``<data_root>/<scene>/<preview_iso_dir>/sensorN_raw.png``.
         preview_path = self._find_preview_file(files)
         np_raw = read_raw(preview_path).astype(np.float32) / RAW_MAX
         preview_full = pack_rggb(np_raw)
@@ -310,13 +295,8 @@ class Trainer:
             return
         model.eval()
         with torch.no_grad():
-            inp = preview_t
-            if self.cfg.subtract_black_level:
-                inp = inp - (9.0 * 256.0 / RAW_MAX)
             with autocast("cuda", enabled=self.cfg.use_fp16):
-                den = model.denoise(inp)
-            if self.cfg.subtract_black_level:
-                den = den + (9.0 * 256.0 / RAW_MAX)
+                den = model.denoise(preview_t)
         den = den.float().clamp(0, 1)
         noisy_np = preview_t[0].float().cpu().numpy().transpose(1, 2, 0)
         den_np = den[0].cpu().numpy().transpose(1, 2, 0)
@@ -333,8 +313,6 @@ class Trainer:
         model, opt, loader, preview_t = self._build()
         device = preview_t.device
 
-        # Pick the autocast dtype: bf16 on Ampere+ (no scaler ever needed),
-        # fp16 on Turing, none on CPU.
         amp_dtype = _autodetect_amp_dtype(device) if cfg.use_fp16 else None
         amp_enabled = amp_dtype is not None
         # GradScaler is only meaningful for fp16; bf16 has fp32 dynamic range
@@ -345,28 +323,15 @@ class Trainer:
             and device.type == "cuda"
         )
         scaler = GradScaler("cuda", enabled=need_scaler)
-        print(f"[trainer] amp_dtype={amp_dtype}  scaler={need_scaler}")
+        print(f"[trainer] amp_dtype={amp_dtype}  scaler={need_scaler}  "
+              f"lam_vgg={cfg.lam_vgg}")
 
-        # Optional torch.compile for the model forward (Linux + Triton only).
         if cfg.use_torch_compile:
             model_compiled = _try_torch_compile(model)
             if model_compiled is not model:
                 print("[trainer] torch.compile active (reduce-overhead)")
         else:
             model_compiled = model
-        loss_base = get_loss(cfg.loss_name)
-        if cfg.loss_kwargs:
-            loss_kw = dict(cfg.loss_kwargs)
-            def main_loss_fn(d, t, _f=loss_base, _kw=loss_kw):
-                return _f(d, t, **_kw)
-        else:
-            main_loss_fn = loss_base
-
-        # Optional zero-mean preprocessing: subtract a constant equal to the
-        # 8-bit black-level scaled into the [0, 1] input domain.
-        bl_norm = 0.0
-        if cfg.subtract_black_level:
-            bl_norm = 9.0 * 256.0 / RAW_MAX  # ~0.0352
 
         Path(cfg.ckpt_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -376,26 +341,24 @@ class Trainer:
         budget = max(1.0, cfg.train_seconds)
         model.train()
 
-        # Sorted unique intermediate save times still pending.
         pending_saves = sorted(set(
             float(s) for s in (cfg.intermediate_save_seconds or ())
             if 0 < float(s) < budget
         ))
 
-        # Loss accumulators on the GPU - avoids per-step .cpu() sync
+        # GPU-resident accumulators avoid per-step .cpu() syncs.
         loss_sum = torch.zeros((), device=device)
-        main_sum = torch.zeros((), device=device)
-        reg_sum = torch.zeros((), device=device)
+        l1_sum = torch.zeros((), device=device)
+        vgg_sum = torch.zeros((), device=device)
         loss_count = 0
         epoch_t0 = time.time()
 
-        # Emit a starting preview (epoch 0, untrained)
         self._run_preview(model, preview_t, step=0, epoch=0)
 
         # Two source modes:
-        #   - GPUDataset: we drive the loop ourselves, computing
-        #     ``steps_per_epoch`` from samples_per_epoch / batch_size.
-        #   - DataLoader: iterate over its batches per epoch as usual.
+        #   - GPUDataset: drive the loop ourselves with
+        #     ``steps_per_epoch = samples_per_epoch / batch_size``.
+        #   - DataLoader: iterate over its batches per epoch.
         is_gpu_ds = isinstance(loader, GPUDataset)
         steps_per_epoch = max(1, cfg.samples_per_epoch // cfg.batch_size)
 
@@ -420,14 +383,10 @@ class Trainer:
                     batch = batch.to(device, non_blocking=True)
                     if device.type == "cuda" and self.cfg.use_channels_last:
                         batch = batch.to(memory_format=torch.channels_last)
-                # GPUDataset already returns a channels_last batch on GPU.
-                if bl_norm > 0:
-                    batch = batch - bl_norm
 
-                # Mask sampling does no benefit from autocast and only adds
-                # int<->half overhead; keep it in fp32 outside autocast.
-                # `idx1` / `idx2` are int64 per-cell indices (no boolean
-                # mask + argmax round-trip).
+                # N2N pair sampling stays in fp32 (no autocast benefit and
+                # avoids int<->half overhead). ``idx1`` / ``idx2`` are int64
+                # per-cell indices.
                 idx1, idx2 = generate_index_pair(batch)
                 g1 = subimage_by_idx(batch, idx1)
                 g2 = subimage_by_idx(batch, idx2)
@@ -439,21 +398,9 @@ class Trainer:
                 ):
                     pred_noise_g1 = model_compiled(g1)
                     den_g1 = g1 - pred_noise_g1
-                    main = main_loss_fn(den_g1, g2)
-
-                    if cfg.n2n_lambda > 0:
-                        # N2N consistency regulariser (paper Eq.4). Skipped
-                        # when lambda == 0 to halve the forward cost.
-                        with torch.no_grad():
-                            full_noise = model_compiled(batch)
-                            full_den = batch - full_noise
-                            full_g1 = subimage_by_idx(full_den, idx1)
-                            full_g2 = subimage_by_idx(full_den, idx2)
-                        reg = F.l1_loss(den_g1 - g2, full_g1 - full_g2)
-                        loss = main + cfg.n2n_lambda * reg
-                    else:
-                        reg = main.detach() * 0  # zero on the autocast device
-                        loss = main
+                    l1_term = F.l1_loss(den_g1, g2)
+                    vgg_term = vgg_perceptual_loss(den_g1, g2)
+                    loss = l1_term + cfg.lam_vgg * vgg_term
 
                 opt.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
@@ -462,19 +409,19 @@ class Trainer:
 
                 step += 1
                 loss_sum = loss_sum + loss.detach()
-                main_sum = main_sum + main.detach()
-                reg_sum = reg_sum + reg.detach()
+                l1_sum = l1_sum + l1_term.detach()
+                vgg_sum = vgg_sum + vgg_term.detach()
                 loss_count += 1
 
             # End of an epoch (or stopped mid-epoch): summarise on GPU then
             # move the scalars to CPU all at once.
             if loss_count > 0:
                 mean_loss = float((loss_sum / loss_count).item())
-                mean_main = float((main_sum / loss_count).item())
-                mean_reg = float((reg_sum / loss_count).item())
+                mean_l1 = float((l1_sum / loss_count).item())
+                mean_vgg = float((vgg_sum / loss_count).item())
                 loss_sum = torch.zeros((), device=device)
-                main_sum = torch.zeros((), device=device)
-                reg_sum = torch.zeros((), device=device)
+                l1_sum = torch.zeros((), device=device)
+                vgg_sum = torch.zeros((), device=device)
                 ep_dt = time.time() - epoch_t0
                 sps = loss_count / max(1e-6, ep_dt)
                 self.state.losses.append(mean_loss)
@@ -486,8 +433,8 @@ class Trainer:
                             step=step,
                             epoch=epoch,
                             loss=mean_loss,
-                            main_loss=mean_main,
-                            reg_loss=mean_reg,
+                            l1_loss=mean_l1,
+                            vgg_loss=mean_vgg,
                             elapsed=time.time() - t0,
                             progress=min(1.0, (time.time() - t0) / budget),
                             steps_per_sec=sps,

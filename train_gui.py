@@ -125,12 +125,13 @@ class InferWorker(QtCore.QObject):
 # GUI widgets
 # ---------------------------------------------------------------------------
 class LossPlot(FigureCanvas):
-    """Per-epoch loss plot with three log-log curves: main / reg / total.
+    """Per-epoch loss plot with three log-log curves: L1 / VGG / total.
 
-    The denoising-quality metric is ``main`` (L1 between f-denoised g1 and
-    g2) - it converges to the irreducible noise floor and is the right
-    thing to monitor. ``reg`` is the consistency regulariser; it ramps
-    from 0 as the model becomes non-trivial and is expected to grow.
+    The denoising-quality metric is ``L1`` (between f-denoised g1 and
+    g2) — it converges toward the irreducible noise floor.
+    ``VGG`` is the perceptual L1 in VGG-16 feature space; both terms
+    are plotted on the same log-log axes so their relative scales are
+    visible at a glance.
     """
 
     def __init__(self, parent=None):
@@ -141,44 +142,37 @@ class LossPlot(FigureCanvas):
         self.ax.set_xscale("log")
         self.ax.set_yscale("log")
         self.ax.set_xlabel("epoch (log)")
-        self.ax.set_ylabel("mean L1 (log)")
+        self.ax.set_ylabel("mean loss (log)")
         self.ax.set_title("per-epoch training loss (log-log)")
         self.ax.grid(True, which="both", linestyle=":", alpha=0.4)
-        (self._main_line,) = self.ax.plot(
-            [], [], color="#1f77b4", linewidth=1.6, marker="o", markersize=4, label="main L1"
+        (self._l1_line,) = self.ax.plot(
+            [], [], color="#1f77b4", linewidth=1.6, marker="o", markersize=4, label="L1"
         )
-        (self._reg_line,) = self.ax.plot(
-            [], [], color="#d62728", linewidth=1.0, marker="x", markersize=4, label="reg L1"
+        (self._vgg_line,) = self.ax.plot(
+            [], [], color="#d62728", linewidth=1.2, marker="x", markersize=4, label="VGG"
         )
         (self._total_line,) = self.ax.plot(
-            [], [], color="#7f7f7f", linewidth=0.8, linestyle="--", label="total"
+            [], [], color="#7f7f7f", linewidth=0.8, linestyle="--", label="L1 + λ·VGG"
         )
         self.ax.legend(loc="upper right", fontsize=8)
         self._xs: list[int] = []
-        self._main: list[float] = []
-        self._reg: list[float] = []
+        self._l1: list[float] = []
+        self._vgg: list[float] = []
         self._total: list[float] = []
         fig.tight_layout()
 
-    def append(self, epoch: int, main: float, reg: float, total: float):
-        if not np.isfinite(main) or not np.isfinite(total):
+    def append(self, epoch: int, l1: float, vgg: float, total: float):
+        if not np.isfinite(l1) or not np.isfinite(total):
             return
         self._xs.append(epoch)
-        self._main.append(max(main, 1e-9))
-        self._reg.append(max(reg, 1e-9))
+        self._l1.append(max(l1, 1e-9))
+        self._vgg.append(max(vgg, 1e-9))
         self._total.append(max(total, 1e-9))
-        self._main_line.set_data(self._xs, self._main)
-        # Only show reg / total when reg is actually being optimised; otherwise
-        # they coincide with main and clutter the plot.
-        reg_active = max(self._reg) > 1e-7
-        if reg_active:
-            self._reg_line.set_data(self._xs, self._reg)
-            self._total_line.set_data(self._xs, self._total)
-        else:
-            self._reg_line.set_data([], [])
-            self._total_line.set_data([], [])
+        self._l1_line.set_data(self._xs, self._l1)
+        self._vgg_line.set_data(self._xs, self._vgg)
+        self._total_line.set_data(self._xs, self._total)
         self.ax.set_xlim(max(1, self._xs[0]), max(2, self._xs[-1] * 1.1))
-        ys = self._main + (self._reg + self._total if reg_active else [])
+        ys = self._l1 + self._vgg + self._total
         lo = max(min(ys) * 0.6, 1e-6)
         hi = max(ys) * 1.4
         self.ax.set_ylim(lo, hi)
@@ -186,10 +180,10 @@ class LossPlot(FigureCanvas):
 
     def reset(self):
         self._xs.clear()
-        self._main.clear()
-        self._reg.clear()
+        self._l1.clear()
+        self._vgg.clear()
         self._total.clear()
-        for ln in (self._main_line, self._reg_line, self._total_line):
+        for ln in (self._l1_line, self._vgg_line, self._total_line):
             ln.set_data([], [])
         self.draw_idle()
 
@@ -447,10 +441,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(object)
     def on_step(self, info: StepInfo):
-        self.loss_plot.append(info.epoch, info.main_loss, info.reg_loss, info.loss)
+        self.loss_plot.append(info.epoch, info.l1_loss, info.vgg_loss, info.loss)
         self.step_label.setText(
             f"epoch {info.epoch}  step {info.step}  "
-            f"main {info.main_loss:.5f}  reg {info.reg_loss:.5f}  "
+            f"L1 {info.l1_loss:.5f}  VGG {info.vgg_loss:.4f}  "
             f"total {info.loss:.5f}  ({info.steps_per_sec:.1f} it/s)"
         )
 
