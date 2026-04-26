@@ -24,7 +24,7 @@ def main() -> None:
         intermediate_save_seconds=(),
         ckpt_path="checkpoints/_benchmark.pt",
     )
-    print(f"=== benchmark · L1 + {cfg.lam_vgg}·VGG · "
+    print(f"=== benchmark · N2N (L2 + γ·L_reg, γ→{cfg.gamma_final}) · "
           f"patch={cfg.patch_size} batch={cfg.batch_size} depth={cfg.unet_depth} ===")
     print(f"  data_root : {cfg.data_root}")
     print(f"  duration  : {cfg.train_seconds:.0f}s ({cfg.train_seconds/60:.1f} min)\n")

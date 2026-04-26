@@ -11,9 +11,8 @@ the 64x64 noisy/denoised preview in the UI without clicking anything.
 
 Examples
 --------
-    python run_train.py 300        # 5 minutes
-    python run_train.py 60         # quick 1-minute smoke run
-    python run_train.py 1800       # 30 minutes
+    python run_train.py 600        # 10 minutes (recommended minimum)
+    python run_train.py 1200       # 20 minutes
 """
 from __future__ import annotations
 
@@ -23,7 +22,10 @@ import train_gui
 
 
 def main():
-    seconds = int(sys.argv[1]) if len(sys.argv) > 1 else 300
+    # 600 s is the smallest budget where the non-residual UNet reliably
+    # converges out of random init. Going lower risks the catastrophic
+    # 2×2-grid output the experiments in tmp4/ documented.
+    seconds = int(sys.argv[1]) if len(sys.argv) > 1 else 600
     sys.argv = [sys.argv[0], str(seconds), "--auto-start", "--auto-result"]
     train_gui.main()
 

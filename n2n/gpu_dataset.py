@@ -21,6 +21,7 @@ class GPUDataset:
         *,
         dtype: torch.dtype = torch.float32,
         memory_format: torch.memory_format = torch.contiguous_format,
+        augment: bool = True,
     ) -> None:
         if not files:
             raise ValueError("Empty file list")
@@ -38,6 +39,7 @@ class GPUDataset:
         self.w = self.frames.shape[3]
         self.dtype = dtype
         self.memory_format = memory_format
+        self.augment = augment
 
     def __len__(self) -> int:
         return self.n_files
@@ -57,12 +59,19 @@ class GPUDataset:
             y = random.randrange(0, self.h - ps + 1)
             x = random.randrange(0, self.w - ps + 1)
             patch = self.frames[i, :, y:y + ps, x:x + ps]
-            if random.random() < 0.5:
-                patch = patch.flip(-1)
-            if random.random() < 0.5:
-                patch = patch.flip(-2)
-            if random.random() < 0.5:
-                patch = patch.transpose(-1, -2)
+            if self.augment:
+                # NOTE: these flips/transposes operate on the packed tensor.
+                # They preserve the per-cell channel order [R, Gr, Gb, B] but
+                # *do not* permute channels to match a true Bayer-pattern
+                # flip (which would swap R↔Gr and Gb↔B for flip(-1), etc.).
+                # The model still sees consistent (R, Gr, Gb, B) tuples; it
+                # just sees them in spatially mirrored / transposed scenes.
+                if random.random() < 0.5:
+                    patch = patch.flip(-1)
+                if random.random() < 0.5:
+                    patch = patch.flip(-2)
+                if random.random() < 0.5:
+                    patch = patch.transpose(-1, -2)
             crops.append(patch)
         # Materialise the batch in the requested memory layout. This fuses
         # the stack + the channels_last conversion that the trainer used to

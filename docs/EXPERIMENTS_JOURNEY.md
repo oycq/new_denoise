@@ -1,18 +1,16 @@
 # N2N 降噪：实验过程与知识沉淀
 
-> 这一份是**整个项目的总结性文档**，记录从最初的 L1 baseline 到最终
-> 推荐 **VGG-as-loss** 之间所有的尝试、量化结果和经验教训。
+> 这一份是**整个项目的总结性文档**，按时间顺序记录从最初的 L1 baseline
+> 一路到最终配方的所有尝试、量化结果和经验教训。
 >
-> 当前代码库里只保留了两条干净的训练路径：
+> **当前线上配方 = N2N 论文原配方**（`L2 + γ·L_reg` + 非残差 UNet +
+> BlurPool/PixelShuffle，`n2n/trainer.py` 默认配置，`python run_train.py 600`
+> 即起 GUI 训 10 min）。**结论与所有补丁式失败的故事都在文档第 12 节**——
+> 强烈建议先读那一节再回头看历史细节。
 >
-> * **生产 baseline**：`L1 + 0.03·TV`（`n2n/trainer.py` 默认配置，
->   一行 `python run_train.py` 即起 GUI）
-> * **★ 推荐感知方案**：robust 训练 (EMA + R2R + mask + jitter) +
->   VGG-16 feature L1（`python train_vgg.py` 一键复现）
->
-> 其它历史方案的**代码已经清理掉**或归档到本地 `_archive_local/`
-> （`.gitignore` 已忽略），但**实验结论以文本形式完整保留在本文中**，
-> 后续随时可按本文索引找回原配置重新跑。
+> 早期尝试过的 L1+TV / robust 训练 / VGG perceptual loss / 各种 mode
+> penalty 都已废弃；其代码已经清理或归档到本地 `_archive_local/`（git 忽略），
+> 但所有实验配置以文本形式完整保留在本文中，需要复现时按章节索引即可。
 
 ---
 
@@ -627,3 +625,85 @@ GPU + Linux 时自动启用**：
 
 切换逻辑写在 `n2n/trainer.py::_autodetect_amp_dtype` /
 `_try_torch_compile`，启动时打印当前 dtype。
+
+---
+
+## 12. 阶段 7（最终结论）：回到 N2N 论文原配方
+
+文档头部介绍的"L1 + 0.03·TV"和"L1 + VGG"两条路径，**都已废弃**。
+继续追低光 ISO=16 的 2×2 grid artifact 时发现：所有非平凡 loss
+(VGG / TV / mode penalty / Gr-Gb 一致性 / channel std equalization)
+都是给现象打补丁，**根因是 cleanup commit 把 Neighbor2Neighbor 论文
+的一致性正则项删掉了**。
+
+### 阶段 7 的一系列失败
+
+按时间顺序记下被否决的方案，避免下次再走一遍：
+
+| 方案 | 思路 | 失败原因 |
+|---|---|---|
+| `Gr-Gb \|·\|` 一致性 | 强制网络让 Gr 和 Gb 输出相等 | 视觉上 grid 没消，定量上只治住了 4 个 2×2 模式中的 1 个 |
+| demosaic L1 | 在可微分 demosaic 输出上也做 N2N L1 | 子采样和目标都有同样的 grid，L1 互相抵消，没效果 |
+| 对角 mode penalty (`X3`) | 用 `[[1,-1],[-1,1]]` 卷积惩罚特定 2×2 mode | 能量跑到 H/V mode → 输出**横条纹** |
+| 全模式 mode penalty (`X5`) | 同时惩罚 H/V/D 三个 mode | 改善有限，每个 mode 实际权重只剩 1/3 |
+| channel std equalize (`X6`) | 强制 R/Gr/Gb/B 残差 std 相等 | 网络放弃去噪以满足约束，输出几乎等于 noisy |
+| Bilinear 上采样 + all-mode (`X9`) | 改架构去除 PixelShuffle 的 2×2 inductive bias | 视觉很干净但 X10 加额外 D-mode 后**过糊 + 绿色色偏** |
+
+### 阶段 7 的根因
+
+Neighbor2Neighbor 论文（Huang et al., CVPR 2021）的官方 loss 是：
+
+```
+L = ‖f(g₁) − g₂‖²  +  γ · ‖(f(g₁) − g₂) − (g₁(f(y)) − g₂(f(y)))‖²
+                                                            ^^^^^^^^
+                                              一致性正则——之前 commit 删掉了
+```
+
+第二项强制**子采样推理**和**全图推理**输出一致。没这一项时网络在
+两种推理路径上 over-smooth / under-smooth 程度不同，**差异即可见的
+2×2 grid**。我加的 mode penalty 是在治症状；论文这一项从源头不让
+分裂发生。
+
+### 阶段 7 的成功配方
+
+加上一致性正则，并采纳 N2V2 (Hoeck et al. 2022) 的两个 anti-checkerboard
+fix，方案降到极简：
+
+- **网络**：非残差 UNet（`denoise(x) = forward(x)`，不是 `x − net(x)`）+
+  BlurPool 下采样 + PixelShuffle 上采样（`n2n/model.py`）
+- **loss**：L2 重建 + γ·L_reg（γ 从 0 渐进到 2），无 VGG / 无 TV /
+  无任何 mode penalty
+- **训练时长**：≥ 600 s（10 min）。非残差 UNet 没有零初始化恒等先验，
+  5 min 以下有概率出现"灾难棋盘"——`tmp4/` 5 min 实测 sum_dark_roof
+  达到 25（noisy 输入 7），10 min 立即降到 0.97。
+
+10 / 15 / 20 min 实测对比（同一 ckpt 续训）：
+
+| 训练时长 | sum_dark_roof | sum_pillar | sum_shadow |
+|---|---|---|---|
+| 10 min  | 0.979 | 2.090 | 2.595 |
+| 15 min  | 0.926 | 2.175 | 2.521 |
+| 20 min  | 0.869 | 2.015 | 2.344 |
+
+10 → 20 min 给约 11% 量化改善，视觉上几乎不可见。**10 min 是甜蜜点**。
+
+### 实测吞吐量（4090 + bf16 + torch.compile）
+
+```
+非残差 UNet + L2 + γ·L_reg (depth=3, patch=256, batch=6)  ~110 sps
+```
+
+比之前 L1+VGG 方案（45 sps）快 **2.5×**——因为没了 VGG forward，
+只多了一次全图 forward (no_grad) 给一致性正则。
+
+### 教训
+
+1. **第一选择是论文原配方**。我跳过这一步直接组合"自家 trick"，
+   走了几小时弯路。
+2. **删功能要看清作用**。`n2n_lambda` 默认 0 看起来"未启用"，但论文
+   推荐值是 1，而且对 Bayer raw 是必需的。删掉等于把 N2N 退化成
+   普通自监督。
+3. **mode-level 补丁是 whack-a-mole**。打掉一个模式，能量跑到另一个。
+   只有从训练目标层面消除分裂源才根治。
+4. **非残差网络对训练时长敏感**。残差网络的零初始化"恒等"先验是
+   重要安全网；去掉以后必须保证训练时间够长。
