@@ -80,6 +80,20 @@ class RobustTrainConfig:
     unet_depth: int = 3
     use_fp16: bool = True
 
+    # --- Speed knobs (parity with n2n.trainer.Trainer) -------------------
+    # NHWC ("channels_last") layout: cuDNN's fp16/bf16 conv kernels prefer
+    # this; gives ~+20% on baseline convs. Also tells GPUDataset to fuse
+    # the conversion into its stack so we save one memcpy per step.
+    use_channels_last: bool = True
+    # `fused=True` runs Adam's elementwise update in a single CUDA kernel
+    # instead of dispatching ~5 ops per parameter tensor. Big win for the
+    # ~28 conv weight + bias tensors we have.
+    use_fused_adam: bool = True
+    # ``torch.compile(mode='reduce-overhead')`` captures the model into a
+    # CUDA graph: another 1.3-1.5x on Ampere+. Needs Triton (Linux). The
+    # trainer auto-detects and falls back to eager.
+    use_torch_compile: bool = True
+
     # Loss
     loss_name: str = "l1_plus_tv"
     loss_kwargs: dict = field(default_factory=lambda: {"lam": 0.03})
@@ -204,16 +218,37 @@ class RobustTrainer:
         self.is_cancelled = is_cancelled or (lambda: False)
 
     def _build_model(self, device: torch.device) -> UNet:
-        return UNet(
+        model = UNet(
             in_ch=4, out_ch=4,
             base=self.cfg.base_channels, depth=self.cfg.unet_depth,
         ).to(device)
+        if device.type == "cuda" and self.cfg.use_channels_last:
+            model = model.to(memory_format=torch.channels_last)
+        return model
 
     def _autocast_dtype(self, device: torch.device) -> Optional[torch.dtype]:
         if device.type != "cuda" or not self.cfg.use_fp16:
             return None
         major, _ = torch.cuda.get_device_capability(device)
         return torch.bfloat16 if major >= 8 else torch.float16
+
+    def _try_torch_compile(self, model: torch.nn.Module) -> torch.nn.Module:
+        """``torch.compile(mode='reduce-overhead')`` if available.
+
+        Inductor backend needs Triton (no Windows wheel); fall back to
+        eager on import / compile failure so the trainer is still usable.
+        """
+        if not self.cfg.use_torch_compile:
+            return model
+        try:
+            import triton  # noqa: F401  (presence test only)
+        except Exception:
+            return model
+        try:
+            return torch.compile(model, mode="reduce-overhead", dynamic=False)
+        except Exception as exc:  # pragma: no cover
+            print(f"[robust] torch.compile unavailable, using eager: {exc}")
+            return model
 
     def run(self) -> Path:
         cfg = self.cfg
@@ -225,18 +260,50 @@ class RobustTrainer:
         if device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         files = find_raw_files(cfg.data_root)
         if not files:
             raise RuntimeError(f"No raw files under {cfg.data_root}")
 
-        ds = GPUDataset(files, device=device, dtype=torch.float32)
+        # Pre-pack raw frames in the layout the model expects so the
+        # per-step stack fuses the channels_last conversion (saves one
+        # memcpy of (B, 4, ps, ps) per step, ~+20% with bf16 convs).
+        mem_fmt = (
+            torch.channels_last
+            if (device.type == "cuda" and cfg.use_channels_last)
+            else torch.contiguous_format
+        )
+        ds = GPUDataset(
+            files, device=device, dtype=torch.float32, memory_format=mem_fmt
+        )
         print(f"[robust] dataset: {len(ds)} frames, {ds.memory_mb():.0f} MB on {device}")
 
         model = self._build_model(device)
-        opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+        adam_kwargs = dict(lr=cfg.lr)
+        if device.type == "cuda" and cfg.use_fused_adam:
+            adam_kwargs["fused"] = True
+        opt = torch.optim.Adam(model.parameters(), **adam_kwargs)
 
+        # IMPORTANT: build the EMA *before* compiling — deepcopy of an
+        # ``OptimizedModule`` is fragile, and the EMA's parameters share
+        # storage with the (un-wrapped) student so the optimizer step
+        # still propagates correctly. The compiled wrapper below only
+        # replaces the *forward call path* used in the training loop.
         ema = EMAModel(model, decay=cfg.ema_decay) if cfg.use_ema_distill else None
+
+        # Compile after EMA setup. We also compile a *separate* forward
+        # wrapper for the teacher because the teacher does an extra
+        # forward per step on every robust step (EMA self-distill) — if
+        # we leave it eager the per-step speedup is capped at ~50%.
+        # ``ema.module`` itself stays uncompiled so its ``state_dict()``
+        # / ``update()`` paths keep their unprefixed keys.
+        model_fwd = self._try_torch_compile(model)
+        ema_fwd = (
+            self._try_torch_compile(ema.module) if ema is not None else None
+        )
+        if model_fwd is not model:
+            print("[robust] torch.compile active (reduce-overhead)")
 
         # Optional: resume model + EMA + step counter + loss_log from an
         # existing ckpt. The saved "model" key is the EMA copy when EMA
@@ -283,9 +350,14 @@ class RobustTrainer:
         steps_per_epoch = max(1, cfg.samples_per_epoch // cfg.batch_size)
 
         loss_log: list[tuple[int, float]] = list(prev_loss_log)  # (step, loss)
-        recent: list[float] = []
-        recent_main: list[float] = []
-        recent_ema: list[float] = []
+
+        # Loss accumulators on the GPU - avoids the per-step .item() sync
+        # that otherwise gates every step on a CPU<->GPU round-trip and
+        # caps speed at ~150 sps. We only sync when emitting a log line.
+        loss_sum = torch.zeros((), device=device)
+        main_sum = torch.zeros((), device=device)
+        ema_sum = torch.zeros((), device=device)
+        steps_since_log = 0
 
         model.train()
         stop = False
@@ -332,14 +404,14 @@ class RobustTrainer:
                     enabled=amp_enabled,
                     dtype=amp_dtype if amp_enabled else torch.float16,
                 ):
-                    pred_noise = model(g1)
+                    pred_noise = model_fwd(g1)
                     den_g1 = g1 - pred_noise
                     main = main_loss_fn(den_g1, g2)
 
                     ema_term = torch.tensor(0.0, device=device, dtype=main.dtype)
                     if ema is not None and step >= cfg.ema_warmup_steps:
                         with torch.no_grad():
-                            teacher_noise = ema.module(g1)
+                            teacher_noise = ema_fwd(g1)
                             teacher_den = g1 - teacher_noise
                         ema_term = F.l1_loss(den_g1, teacher_den.detach())
                         loss = main + cfg.ema_lam * ema_term
@@ -354,23 +426,29 @@ class RobustTrainer:
                     ema.update(model)
 
                 step += 1
-                recent.append(float(loss.detach().item()))
-                recent_main.append(float(main.detach().item()))
+                steps_since_log += 1
+                loss_sum = loss_sum + loss.detach()
+                main_sum = main_sum + main.detach()
                 if ema is not None:
-                    recent_ema.append(float(ema_term.detach().item()))
+                    ema_sum = ema_sum + ema_term.detach()
 
                 if step % cfg.log_every == 0:
                     sps = cfg.log_every / max(1e-6, time.time() - last_log_t)
                     last_log_t = time.time()
-                    main_avg = sum(recent_main[-cfg.log_every:]) / cfg.log_every
-                    ema_avg = sum(recent_ema[-cfg.log_every:]) / max(1, len(recent_ema[-cfg.log_every:])) if recent_ema else 0.0
+                    n = max(1, steps_since_log)
+                    loss_avg = float((loss_sum / n).item())
+                    main_avg = float((main_sum / n).item())
+                    ema_avg = float((ema_sum / n).item()) if ema is not None else 0.0
+                    loss_sum = torch.zeros((), device=device)
+                    main_sum = torch.zeros((), device=device)
+                    ema_sum = torch.zeros((), device=device)
+                    steps_since_log = 0
                     print(
                         f"[robust] step={step:6d} ep={epoch:3d} "
-                        f"loss={sum(recent[-cfg.log_every:])/cfg.log_every:.5f} "
-                        f"main={main_avg:.5f} ema={ema_avg:.5f} "
+                        f"loss={loss_avg:.5f} main={main_avg:.5f} ema={ema_avg:.5f} "
                         f"elapsed={elapsed:.1f}s sps={sps:.1f}"
                     )
-                    loss_log.append((step, sum(recent[-cfg.log_every:]) / cfg.log_every))
+                    loss_log.append((step, loss_avg))
 
         # Save the *EMA* model weights when EMA is active (smoother), else
         # save the trained student. EMA also pulled toward the same optimum
