@@ -3,6 +3,16 @@
 All loss functions take ``(den, target)`` tensors of shape ``(N, C, H, W)``
 and return a scalar tensor. The ``den`` tensor is the model's denoised
 output for the g1 sub-image; ``target`` is the g2 sub-image.
+
+The locked production loss is :func:`l1_plus_tv` (``lam=0.03``); see
+``docs/EXPERIMENTS_JOURNEY.md`` for the journey to that choice. The
+seven other entries (``l1`` … ``ms_l1_charbonnier``) are the legacy
+sweep candidates, kept here so the registry below still works as a
+historical reference.
+
+Perceptual / VGG-based losses live in :mod:`n2n.losses_perceptual` and
+are lazy-registered the first time :func:`get` is asked for one (so we
+don't pay the ``torchvision.models`` import cost on every training run).
 """
 from __future__ import annotations
 
@@ -126,7 +136,26 @@ REGISTRY: dict[str, LossFn] = {
 }
 
 
+def _register_perceptual_once() -> None:
+    """Lazy-register the perceptual (HVS / VGG) losses.
+
+    Kept lazy so that simply importing :mod:`n2n.losses` does NOT trigger
+    a ``torchvision.models`` import. Pays its cost only when the trainer
+    actually asks for a perceptual loss by name.
+    """
+    if "vgg_perceptual_loss" in REGISTRY:
+        return
+    try:
+        from .losses_perceptual import EXTRA_REGISTRY_PERCEPTUAL
+    except Exception as exc:  # pragma: no cover
+        print(f"[losses] losses_perceptual not available: {exc}")
+        return
+    REGISTRY.update(EXTRA_REGISTRY_PERCEPTUAL)
+
+
 def get(name: str) -> LossFn:
+    if name not in REGISTRY:
+        _register_perceptual_once()
     if name not in REGISTRY:
         raise KeyError(f"unknown loss: {name}; available={list(REGISTRY)}")
     return REGISTRY[name]

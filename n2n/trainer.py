@@ -138,6 +138,18 @@ class TrainConfig:
     # which isn't shipped on Windows; the trainer auto-detects and falls
     # back to eager. Set False to force-disable.
     use_torch_compile: bool = True
+    # Save the model checkpoint to the configured path even if a separate
+    # 2-min snapshot was scheduled. Some experiments use only the final
+    # ckpt and want the intermediate saves disabled.
+    save_final: bool = True
+    # Fused Adam fails on heterogeneous-layout models (notably depthwise
+    # separable convs once the model is .to(memory_format=channels_last)).
+    # Set False to fall back to the eager Adam path. Keep True by default.
+    use_fused_adam: bool = True
+    # The trainer applies channels_last to the model on CUDA, which gives
+    # ~+20% on baseline convs but fights with depthwise / certain BN
+    # layouts. Set False to keep contiguous NCHW for the model only.
+    use_channels_last: bool = True
 
 
 @dataclass
@@ -214,8 +226,13 @@ class Trainer:
             # Hand the dataset our preferred memory format so it can fuse
             # the channels_last conversion into the final stack (saves one
             # NCHW -> NHWC memcpy per step).
+            mem_fmt = (
+                torch.channels_last
+                if self.cfg.use_channels_last
+                else torch.contiguous_format
+            )
             data_src = GPUDataset(
-                files, device=device, memory_format=torch.channels_last)
+                files, device=device, memory_format=mem_fmt)
             print(f"[trainer] GPUDataset: {len(data_src)} frames, "
                   f"{data_src.memory_mb():.0f} MB on {device}")
         else:
@@ -244,13 +261,13 @@ class Trainer:
         # this layout; with mixed precision it can give 1.1-1.3x on
         # Turing+ GPUs at the cost of input batches needing the same
         # memory layout (handled in the training loop).
-        if device.type == "cuda":
+        if device.type == "cuda" and self.cfg.use_channels_last:
             model = model.to(memory_format=torch.channels_last)
         # `fused=True` runs Adam's elementwise update in a single CUDA
         # kernel instead of dispatching ~5 ops per parameter tensor. With
         # 28 conv weight + bias tensors that's a non-trivial saving.
         adam_kwargs = dict(lr=self.cfg.lr)
-        if device.type == "cuda":
+        if device.type == "cuda" and self.cfg.use_fused_adam:
             adam_kwargs["fused"] = True
         opt = torch.optim.Adam(model.parameters(), **adam_kwargs)
 
@@ -401,7 +418,7 @@ class Trainer:
 
                 if not is_gpu_ds:
                     batch = batch.to(device, non_blocking=True)
-                    if device.type == "cuda":
+                    if device.type == "cuda" and self.cfg.use_channels_last:
                         batch = batch.to(memory_format=torch.channels_last)
                 # GPUDataset already returns a channels_last batch on GPU.
                 if bl_norm > 0:
@@ -502,15 +519,16 @@ class Trainer:
                 )
 
         ckpt = Path(cfg.ckpt_path)
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "config": cfg.__dict__,
-                "steps": step,
-                "elapsed": time.time() - t0,
-            },
-            ckpt,
-        )
+        if cfg.save_final:
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "config": cfg.__dict__,
+                    "steps": step,
+                    "elapsed": time.time() - t0,
+                },
+                ckpt,
+            )
         if self.on_finish:
             self.on_finish(ckpt)
         return ckpt
