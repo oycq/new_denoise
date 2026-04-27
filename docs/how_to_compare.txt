@@ -161,6 +161,36 @@ PixelShuffle、把残差头换成非残差头），那两份 ckpt 的 state_dict
        l1+tv / vendor），ImageJ stack 闪烁对比时一眼看出来当前是哪张。
        本仓库的 _label() 用 cv2.rectangle + cv2.putText 实现。
 
+  4.6  cv2.putText 字体（FONT_HERSHEY_SIMPLEX 等）只支持 ASCII。
+       如果 method label 含 unicode（中点 "·"、箭头 "→"、希腊字母 γλ
+       这种），cv2 会把它渲染成 "?"。HTML 没问题——cv2 只影响 banner。
+       修法：在 _label 里加一张 unicode→ASCII 转写表，cv2 用转写后
+       的字符串，HTML / figcaption 文字仍用原来的 unicode。
+
+           _CV_TRANS = {ord(k): v for k, v in {
+               "\u00b7": ".",     # middle dot ·
+               "\u2192": "->",    # right arrow →
+               "\u03b3": "g",     # gamma γ
+               "\u03bb": "lam",   # lambda λ
+           }.items()}
+
+           def _label(img, text, *, color=(255,255,255), bg=(0,0,0)):
+               img = img.copy()
+               cv2.rectangle(img, (0,0), (img.shape[1], 32), bg, thickness=-1)
+               safe = (text.translate(_CV_TRANS)
+                           .encode("ascii", "replace")
+                           .decode("ascii"))
+               cv2.putText(img, safe, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.7, color, 1, cv2.LINE_AA)
+               return img
+
+       这样 banner 上是 "L1+0.01.TV"（ASCII 句点），HTML caption 仍是
+       "L1+0.01·TV"（unicode 中点）。两边都不丢失语义，也都不乱码。
+
+       踩过的坑：直接 print 没问题、HTML 渲染没问题，但 cv2 banner 是
+       "L1+0.01??TV"。第一次看到这种乱码会怀疑文件编码、shell locale、
+       浏览器字体——其实只是 cv2 的字体表。
+
 
 ================================================================================
 5. HTML 模板风格要素（参考老 docs/REPORT.html 的视觉语言）
