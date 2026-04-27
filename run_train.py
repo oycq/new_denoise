@@ -11,8 +11,8 @@ the 64x64 noisy/denoised preview in the UI without clicking anything.
 
 Examples
 --------
-    python run_train.py 600        # 10 minutes (recommended minimum)
-    python run_train.py 1200       # 20 minutes
+    python run_train.py 600        # 10 minutes (recommended baseline)
+    python run_train.py 1200       # 20 minutes (~5-10% extra detail)
 """
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ import train_gui
 
 
 def main():
-    # 600 s is the smallest budget where the non-residual UNet reliably
-    # converges out of random init. Going lower risks the catastrophic
-    # 2×2-grid output the experiments in tmp4/ documented.
+    # 600 s is the locked-in baseline where L1 + 0.01·TV converges
+    # to the loss plateau (~0.0162). 5 min already converges in loss
+    # but 10 min gives a noticeably cleaner result on dark corners.
     seconds = int(sys.argv[1]) if len(sys.argv) > 1 else 600
     sys.argv = [sys.argv[0], str(seconds), "--auto-start", "--auto-result"]
     train_gui.main()

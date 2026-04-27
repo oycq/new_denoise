@@ -1,28 +1,24 @@
-"""Training loop for Neighbor2Neighbor Bayer denoising.
+"""Training loop for L1 + λ·TV Bayer raw denoising.
 
-Loss is fixed to the **Neighbor2Neighbor (CVPR 2021) recipe**:
+The locked-in production loss is::
 
-::
+    L = L1(f(g₁), g₂) + λ · TV(f(g₁))         (default λ = 0.01)
 
-    L = || f(g₁) − g₂ ||²  +  γ(t) · || (f(g₁) − g₂) − (g₁(f(y)) − g₂(f(y))) ||²
+  - ``f`` is the residual-head UNet from :mod:`n2n.model`
+    (``denoise(x) = x − forward(x)``).
+  - ``g₁, g₂`` are the Neighbor2Neighbor sub-image pair
+    (see :mod:`n2n.n2n_sampler`).
+  - ``TV`` is anisotropic total variation on the denoised output:
+    ``mean(|∂x den|) + mean(|∂y den|)``.
 
-where :math:`f` is the network, :math:`g_1, g_2` are random sub-samples of
-the noisy input :math:`y`, the second term is the **consistency regulariser**
-proposed in the paper, and :math:`\\gamma(t)` ramps linearly from 0 to 2
-over the budget so the model has a chance to converge before the regulariser
-takes over.
-
-The project's experimentation (see ``docs/EXPERIMENTS_JOURNEY.md``)
-explored many alternatives — VGG perceptual loss, mode penalties, Gr-Gb
-consistency, channel std equalisation — and found they all *hurt* either
-through over-smoothing, colour shifts, or new artefacts. The paper's
-two-term loss alone, combined with a non-residual UNet (see ``model.py``),
-is the simplest configuration that produces a clean output without the
-2×2 grid that the residual + L1 + VGG variants suffered from.
-
-Recommended budget: ≥ 600 s (10 min) on a 4090. Below ~5 min the
-non-residual UNet has not yet escaped the random-init basin and may
-output a catastrophic 2×2 grid.
+This is the single recipe the project settled on after the four
+experiment phases documented in ``docs/EXPERIMENTS_JOURNEY.md`` and
+the explicit time-budget sweep recorded in
+``docs/archived_recipes.txt``. Recipes that used to live in this
+trainer (paper N2N consistency reg, VGG perceptual, multi-scale
+Charbonnier, Huber, …) are kept as text snapshots in
+``docs/archived_recipes.txt`` together with the commits to checkout
+if they need to be revived.
 """
 from __future__ import annotations
 
@@ -34,6 +30,7 @@ from typing import Callable, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 try:
     from torch.amp import GradScaler, autocast  # PyTorch >= 2.4
@@ -60,7 +57,15 @@ from .raw_utils import RAW_MAX, pack_rggb, read_raw
 # Device-aware optimisation toggles
 # ---------------------------------------------------------------------------
 def _autodetect_amp_dtype(device: torch.device) -> Optional[torch.dtype]:
-    """Pick the best autocast dtype for the current GPU."""
+    """Pick the best autocast dtype for the current GPU.
+
+    * Ampere or newer (sm_80+, includes 4090): bfloat16 — same dynamic
+      range as fp32, never under/overflows on small losses, lets us drop
+      GradScaler entirely (no host-side inf/nan check, no per-step sync).
+    * Turing (sm_75, e.g. RTX 2070): float16 — fp16 tensor cores exist;
+      bf16 would fall back to a slow software path.
+    * CPU / older GPU: ``None`` (autocast disabled).
+    """
     if device.type != "cuda":
         return None
     major, _ = torch.cuda.get_device_capability(device)
@@ -70,7 +75,7 @@ def _autodetect_amp_dtype(device: torch.device) -> Optional[torch.dtype]:
 
 
 def _try_torch_compile(model: torch.nn.Module) -> torch.nn.Module:
-    """``torch.compile(mode='reduce-overhead')`` if available, else eager."""
+    """``torch.compile(model, mode='reduce-overhead')`` if available."""
     try:
         import triton  # noqa: F401
     except Exception:
@@ -88,30 +93,28 @@ def _try_torch_compile(model: torch.nn.Module) -> torch.nn.Module:
 @dataclass
 class TrainConfig:
     data_root: str = "train_data/Data"
-    patch_size: int = 256         # in packed-pixel units (=> 512 in Bayer)
+    patch_size: int = 256          # in packed-pixel units (=> 512 in Bayer)
     batch_size: int = 6
     base_channels: int = 48
     unet_depth: int = 3
-    lr: float = 3e-4
+    lr: float = 2e-4
     samples_per_epoch: int = 1024
-    num_workers: int = 4          # only used by the legacy DataLoader fallback
+    num_workers: int = 4           # only used by the legacy CPU DataLoader
     use_gpu_dataset: bool = True
     use_fp16: bool = True
-    preview_size: int = 64        # patch size in packed-pixel units
-    preview_iso_dir: str = "16"
+    preview_size: int = 64         # patch size in packed-pixel units
+    preview_iso_dir: str = "16"    # subdir name for the noisiest ISO
     seed: int = 1234
     ckpt_path: str = "checkpoints/n2n_model.pt"
-    # Default 10 min — empirically the smallest budget where the non-residual
-    # UNet reliably converges out of random init. 5 min is a danger zone
-    # (sometimes works, sometimes outputs a catastrophic 2×2 grid).
-    train_seconds: float = 600.0
-    # Final value of γ in the consistency regulariser. The paper uses 1.0
-    # for raw-RGB experiments and 2.0 for synthetic-noise sRGB; 2.0 also
-    # works fine on this dataset and gives a slightly cleaner output.
-    gamma_final: float = 2.0
-    # Optional intermediate checkpoint times (seconds).
+    train_seconds: float = 600.0   # wall-clock budget (default 10 min)
+    # The single learnable knob: TV coefficient on the denoised output.
+    # 0.05 over-smooths, 0.03 hits the ceiling on dark corners,
+    # 0.01 keeps fine detail and is the locked-in baseline.
+    tv_lambda: float = 0.01
+    # Optional intermediate checkpoint times (seconds). Each crossing
+    # writes a snapshot next to ``ckpt_path`` with a ``_<seconds>s`` suffix.
     intermediate_save_seconds: tuple = (300.0, 600.0)
-    # GradScaler is only meaningful for fp16; bf16 has fp32 dynamic range
+    # GradScaler is only useful for fp16; bf16 has fp32 dynamic range
     # so it never under/overflows and we always skip it.
     use_grad_scaler: bool = False
     use_torch_compile: bool = True
@@ -122,15 +125,12 @@ class TrainConfig:
 
 @dataclass
 class StepInfo:
-    """One emission *per epoch* (mean loss components, plus progress info)."""
+    """One emission *per epoch* (mean L1+TV loss across the epoch)."""
     step: int
     epoch: int
-    loss: float       # mean total loss (L_rec + γ·L_reg) across the epoch
-    rec_loss: float   # mean reconstruction term ‖f(g₁) − g₂‖²
-    reg_loss: float   # mean consistency regulariser ‖(f(g₁)−g₂) − (g₁(f(y))−g₂(f(y)))‖²
-    gamma: float      # current γ value (ramps linearly 0 → cfg.gamma_final)
+    loss: float        # mean total loss (L1 + tv_lambda * TV)
     elapsed: float
-    progress: float   # in [0, 1]
+    progress: float    # in [0, 1]
     steps_per_sec: float
 
 
@@ -146,6 +146,22 @@ class PreviewInfo:
 class TrainState:
     losses: List[float] = field(default_factory=list)
     epochs: List[int] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Loss
+# ---------------------------------------------------------------------------
+def _l1_plus_tv(den: torch.Tensor, target: torch.Tensor,
+                lam: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return (total, l1_term, tv_term). Used by the training loop and
+    surfaced in StepInfo so callers can plot the components separately.
+    """
+    l1 = F.l1_loss(den, target)
+    tv = (
+        (den[..., :, 1:] - den[..., :, :-1]).abs().mean()
+        + (den[..., 1:, :] - den[..., :-1, :]).abs().mean()
+    )
+    return l1 + lam * tv, l1, tv
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +288,7 @@ class Trainer:
         )
         scaler = GradScaler("cuda", enabled=need_scaler)
         print(f"[trainer] amp_dtype={amp_dtype}  scaler={need_scaler}  "
-              f"gamma_final={cfg.gamma_final}  budget={cfg.train_seconds:.0f}s")
+              f"tv_lambda={cfg.tv_lambda}  budget={cfg.train_seconds:.0f}s")
 
         if cfg.use_torch_compile:
             model_compiled = _try_torch_compile(model)
@@ -295,8 +311,6 @@ class Trainer:
         ))
 
         loss_sum = torch.zeros((), device=device)
-        rec_sum = torch.zeros((), device=device)
-        reg_sum = torch.zeros((), device=device)
         loss_count = 0
         epoch_t0 = time.time()
 
@@ -327,10 +341,6 @@ class Trainer:
                     if device.type == "cuda" and self.cfg.use_channels_last:
                         batch = batch.to(memory_format=torch.channels_last)
 
-                # γ ramps linearly from 0 to gamma_final across the budget so the
-                # model has a chance to converge before the regulariser takes over.
-                gamma_t = (elapsed / budget) * cfg.gamma_final
-
                 # N2N pair sampling stays in fp32 (no autocast benefit).
                 idx1, idx2 = generate_index_pair(batch)
                 g1 = subimage_by_idx(batch, idx1)
@@ -341,21 +351,8 @@ class Trainer:
                     enabled=amp_enabled,
                     dtype=amp_dtype if amp_enabled else torch.float16,
                 ):
-                    # Reconstruction term: f(g₁) ↦ g₂
                     den_g1 = model_compiled(g1)
-                    diff = den_g1 - g2
-
-                    # Consistency regulariser: full-image inference (no grad)
-                    # sub-sampled to compare to (f(g₁) − g₂).
-                    with torch.no_grad():
-                        full_denoised = model_compiled(batch)
-                        full_g1 = subimage_by_idx(full_denoised, idx1)
-                        full_g2 = subimage_by_idx(full_denoised, idx2)
-                    exp_diff = full_g1 - full_g2
-
-                    rec_term = (diff ** 2).mean()
-                    reg_term = ((diff - exp_diff) ** 2).mean()
-                    loss = rec_term + gamma_t * reg_term
+                    loss, _l1, _tv = _l1_plus_tv(den_g1, g2, cfg.tv_lambda)
 
                 opt.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
@@ -364,18 +361,12 @@ class Trainer:
 
                 step += 1
                 loss_sum = loss_sum + loss.detach()
-                rec_sum = rec_sum + rec_term.detach()
-                reg_sum = reg_sum + reg_term.detach()
                 loss_count += 1
 
             # End of an epoch: emit step info on a single sync.
             if loss_count > 0:
                 mean_loss = float((loss_sum / loss_count).item())
-                mean_rec = float((rec_sum / loss_count).item())
-                mean_reg = float((reg_sum / loss_count).item())
                 loss_sum = torch.zeros((), device=device)
-                rec_sum = torch.zeros((), device=device)
-                reg_sum = torch.zeros((), device=device)
                 ep_dt = time.time() - epoch_t0
                 sps = loss_count / max(1e-6, ep_dt)
                 self.state.losses.append(mean_loss)
@@ -384,8 +375,7 @@ class Trainer:
                 if self.on_step:
                     self.on_step(StepInfo(
                         step=step, epoch=epoch,
-                        loss=mean_loss, rec_loss=mean_rec, reg_loss=mean_reg,
-                        gamma=gamma_t,
+                        loss=mean_loss,
                         elapsed=time.time() - t0,
                         progress=min(1.0, (time.time() - t0) / budget),
                         steps_per_sec=sps,

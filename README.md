@@ -5,26 +5,21 @@
 PyQt5 GUI 实时显示 loss 曲线（log-log）、64×64 patch 的 noisy / denoised
 对比、训练进度，结束后一键把全量推理结果写入 `result/`。
 
-## 当前损失 = N2N 论文原配方（CVPR 2021）
+## 当前损失 = L1 + 0.01 · TV
 
 ```
-L = ‖f(g₁) − g₂‖²  +  γ(t) · ‖(f(g₁) − g₂) − (g₁(f(y)) − g₂(f(y)))‖²
+L = L1(f(g₁), g₂)  +  0.01 · TV(f(g₁))
 ```
 
-- `f` 是网络（**非残差** UNet，输出即去噪结果）
+- `f` 是网络（残差 UNet，`denoise(x) = x − forward(x)`）
 - `g₁, g₂` 是 N2N 子采样
-- `y` 是完整 noisy 输入
-- `γ(t)` 从 0 线性升到 2 ——前者是重建项（让 f(g₁) 逼近 g₂ 的均值 = clean），
-  后者是**一致性正则**（让子采样推理和全图推理输出一致，是 N2N 区别于
-  其他自监督方法的核心创新）
+- `TV(·)` 是去噪输出上的 anisotropic 总变差：`mean(|∂x den|) + mean(|∂y den|)`
 
-> 这是经过 5 个阶段实验后留下的**唯一**配方，详细历程见
-> [`docs/EXPERIMENTS_JOURNEY.md`](docs/EXPERIMENTS_JOURNEY.md)。
-> 简短版：之前的 L1 + VGG perceptual / 各种 mode penalty / Gr-Gb 一致性
-> 都是给 2×2 grid artifact 打补丁，最终发现**根因是缺少 N2N 论文的
-> 一致性正则项**，加回来 + 用非残差网络（N2V2 anti-checkerboard fix）+
-> BlurPool 下采样 + PixelShuffle 上采样后，artifact 自然消失，无需
-> 任何额外 loss term。
+> 这是经过 5 个阶段实验 + 1 次 λ 扫描 + 1 次训练时长扫描后留下的**唯一**配方。
+> 完整历程见 [`docs/EXPERIMENTS_JOURNEY.md`](docs/EXPERIMENTS_JOURNEY.md)。
+> 之前主干里出现过的 paper N2N (L2 + γ·L_reg)、L1 + 0.05·VGG、multi-scale
+> Charbonnier、robust_trainer (EMA + R2R) 等方法的 recipe / 复活步骤都
+> 沉淀到 [`docs/archived_recipes.txt`](docs/archived_recipes.txt)。
 
 ## 0. 快速上手
 
@@ -32,8 +27,8 @@ L = ‖f(g₁) − g₂‖²  +  γ(t) · ‖(f(g₁) − g₂) − (g₁(f(y)) 
 
 ```bash
 pip install -r requirements.txt
-python benchmark.py             # 跑 3 min 看本机 sps
-python run_train.py 600         # 启 GUI 训 10 min（最低稳定值，推荐起点）
+python benchmark.py             # 跑 1 min 看本机 sps
+python run_train.py 600         # 启 GUI 训 10 min
 ```
 
 ## 1. 数据规格
@@ -73,7 +68,7 @@ GUI 顶部能调 `data root` / `train`（秒）/ `batch` / `patch` / `lr` / `FP1
 
 训练中：
 
-- loss 曲线（log-log）实时显示 **rec L2 / reg L2 / total** 三条线
+- loss 曲线（log-log）实时显示 **L1 + λ·TV** 单条线
 - 64×64 patch 通过显示流水线转 RGB → nearest-neighbour 放大显示左右 noisy / denoised 对比
 - 进度条 + 状态栏
 - 训练结束后点 `Generate result/ comparison`：对全量 raw 推理，写入
@@ -93,38 +88,42 @@ patch_size   = 256                   # packed-pixel，对应 512 Bayer
 batch_size   = 6
 unet_depth   = 3
 base_channels= 48                    # ~3 M 参数，~12 MB ckpt
-lr           = 3e-4                  # 论文默认
+lr           = 2e-4
 use_fp16     = True
-train_seconds= 600                   # 10 min（最低稳定值）
-gamma_final  = 2.0                   # γ 在训练结束时的目标值
+train_seconds= 600                   # 10 min（loss 已平台，视觉略好于 5 min）
+tv_lambda    = 0.01                  # TV 系数；0.05 太狠、0.03 仍有平整化、0.01 视觉甜点
 intermediate_save_seconds = (300, 600)
 ```
 
-> ⚠️ **训练时长 ≥ 600 s**。非残差 UNet 没有零初始化的恒等先验，
-> 5 min 以下有概率出现"灾难棋盘"（output 是大片彩色 2×2 网格）；
-> 10 min 是稳定区，15-20 min 给 ~5-10% 渐进改善。
+> **关于训练时长**：5 min 时 loss 已经落到 ~0.0162，10 min 几乎再无下降；
+> 但视觉上 10 min 在 ISO=16 暗区 / 角落 lens-shading 仍比 5 min 更干净，
+> 20 min 提升边际明显减少。10 min 是 cost / quality 甜点。
+> 详见 `docs/archived_recipes.txt` 第 5 节的 λ 扫描记录。
 
 ## 4. 关键实现要点
 
 - **Neighbor2Neighbor sampler** (`n2n/n2n_sampler.py`)：每个 2×2 cell 随机选一对相邻像素。
   子图分辨率减半，通道维不变。
-- **N2N 论文 loss**（`n2n/trainer.py` 内联）：
+- **L1 + λ·TV loss**（`n2n/trainer.py` 内联）：
   ```
-  diff      = f(g₁) − g₂
-  exp_diff  = g₁(f(y)) − g₂(f(y))     [no_grad]
-  loss      = mean(diff²) + γ(t) · mean((diff − exp_diff)²)
+  l1 = F.l1_loss(f(g₁), g₂)
+  tv = mean(|∂x f(g₁)|) + mean(|∂y f(g₁)|)
+  loss = l1 + tv_lambda * tv
   ```
-  第二项强制子采样推理和全图推理输出一致——没这一项的训练等价于普通自监督，
-  会出可见的 2×2 grid artifact（参见 `docs/EXPERIMENTS_JOURNEY.md` 阶段 7）。
-- **非残差 UNet** (`n2n/model.py`)：`denoise(x) = forward(x)`，不是
-  `x − forward(x)`。N2V2 (Hoeck et al. 2022) 论文证明残差头是
-  blind-spot/N2N 自监督方法 checkerboard 的来源。
-- **BlurPool 下采样**：3×3 [1,2,1] 可分离模糊 + avg-pool，替代 max-pool 防混叠。
-- **PixelShuffle 上采样**：1×1 conv → channel-to-space rearrange，
-  替代 stride-2 ConvTranspose 防 checkerboard。
+  L1 比 L2 在中位数上更鲁棒；TV 仅在去噪输出上施加梯度惩罚，
+  抑制 lens-shading 角落的低频 blob 残留。
+- **残差 UNet** (`n2n/model.py`)：`denoise(x) = x − forward(x)`，
+  网络学习"噪声残差"，输出端零初始化让训练从恒等映射出发，
+  对 600s 这种短预算特别友好。
 - **FP16**：`torch.amp.autocast` + 自动 dtype 选择（Ampere+ 走 bf16，Turing 走 fp16）。
 - **GUI 与训练解耦**：训练跑在 `QThread`，通过 Qt signal 把 `StepInfo` /
   `PreviewInfo` 发回 UI 主线程。
+- **GPU-resident dataset** (`n2n/gpu_dataset.py`)：140 帧 packed 一次性
+  贴到 GPU（~744 MB），random crop + flip / transpose 全部 GPU 上做，
+  消除 H2D copy 和 DataLoader 启动开销。
+- **torch.compile(mode='reduce-overhead')**：4090 上 ~91 → ~165 sps（paper N2N）/
+  ~150 → ~290 sps（L1+TV），主要是 CUDA Graph 把每 step kernel launch 开销吃掉。
+  需要 `triton==3.1.0` 与 `torch 2.5.x` 配套。
 
 ## 5. 工程结构
 
@@ -135,14 +134,16 @@ new_denoise/
 │   ├── n2n_sampler.py                # vectorised pair sampling
 │   ├── dataset.py                    # CPU DataLoader fallback
 │   ├── gpu_dataset.py                # GPU-resident 数据集（默认）
-│   ├── model.py                      # 非残差 UNet (BlurPool + PixelShuffle)
-│   ├── trainer.py                    # 训练循环：L2 + γ·L_reg
+│   ├── model.py                      # 残差 UNet (max_pool + ConvTranspose2d)
+│   ├── trainer.py                    # 训练循环：L1 + tv_lambda·TV
 │   └── infer.py                      # tile 推理 + ImageJ-stack 输出
 ├── run_train.py                      # 一键启 GUI
 ├── train_gui.py                      # PyQt5 GUI 实现
-├── benchmark.py                      # 3 分钟吞吐量基准
+├── benchmark.py                      # 1-3 分钟吞吐量基准
 ├── docs/
-│   └── EXPERIMENTS_JOURNEY.md        # 整个项目的来龙去脉 + 经验
+│   ├── EXPERIMENTS_JOURNEY.md        # 整个项目的来龙去脉 + 经验
+│   ├── archived_recipes.txt          # 主干放弃过的方法（paper N2N / VGG / robust / 等）
+│   └── how_to_compare.txt            # 怎么写一份对比 HTML 报告
 ├── requirements.txt
 ├── README.md                         # （本文件）
 ├── QUICKSTART.md                     # 部署到新机器的步骤
@@ -154,10 +155,11 @@ new_denoise/
 └── _archive_local/                   # 历史报告 / 实验产物
 ```
 
-## 6. 资源占用参考（RTX 4090 + FP16）
+## 6. 资源占用参考（RTX 4090 + bf16 + torch.compile）
 
 | 配置 | step/sec | 显存 | 备注 |
 |---|---|---|---|
-| 非残差 UNet + L2 + γ·L_reg (depth=3, patch=256, batch=6) | ~110 | ~2 GB | 第二个 forward (no_grad) 让步进慢一倍但损失项是论文原版 |
+| 残差 UNet + L1 + 0.01·TV (depth=3, patch=256, batch=6) | ~285 | ~2 GB | 单 forward / step |
+| paper N2N（已存档）  L2 + γ·L_reg                     | ~163 | ~2 GB | 多一次 full-image forward (一致性正则) |
 
-整图 1280×1088 推理 + 512 tile + 32 overlap，单帧约 0.3 s。
+整图 1280×1088 推理 + 512 tile + 32 overlap，单帧约 0.05–0.45 s（首张含 cuDNN 算法选择开销）。

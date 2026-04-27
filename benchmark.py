@@ -1,9 +1,9 @@
 """3-minute throughput benchmark.
 
 Just run it - no arguments. Reports the achievable step/sec for the
-default `TrainConfig` and how many epochs you'd hit at 5 / 10 / 20 min,
-plus a recommended ``train_seconds`` to match the reference dev box
-(258 epochs at 20 min on RTX 2070).
+default ``TrainConfig`` (L1 + tv_lambda·TV) and how many epochs you'd
+hit at 5 / 10 / 20 min, plus a recommended ``train_seconds`` to match
+the reference dev box.
 
     python benchmark.py
 """
@@ -13,8 +13,8 @@ from dataclasses import replace
 
 from n2n.trainer import StepInfo, Trainer, TrainConfig
 
-BENCHMARK_SECONDS = 180.0  # 3 minutes
-DEV_TARGET_EPOCHS = 258    # epochs at the 20-min mark on the dev box (RTX 2070)
+BENCHMARK_SECONDS = 60.0  # 1 minute (set 180.0 for the full 3-min run)
+DEV_TARGET_EPOCHS = 977    # epochs at the 10-min mark on the dev box (RTX 4090)
 
 
 def main() -> None:
@@ -24,7 +24,7 @@ def main() -> None:
         intermediate_save_seconds=(),
         ckpt_path="checkpoints/_benchmark.pt",
     )
-    print(f"=== benchmark · N2N (L2 + γ·L_reg, γ→{cfg.gamma_final}) · "
+    print(f"=== benchmark · L1 + {cfg.tv_lambda}*TV · "
           f"patch={cfg.patch_size} batch={cfg.batch_size} depth={cfg.unet_depth} ===")
     print(f"  data_root : {cfg.data_root}")
     print(f"  duration  : {cfg.train_seconds:.0f}s ({cfg.train_seconds/60:.1f} min)\n")
@@ -32,9 +32,9 @@ def main() -> None:
     last = {"step": 0, "epoch": 0, "elapsed": 0.0}
 
     def _on_step(s: StepInfo) -> None:
-        if s.epoch % 5 == 0:
-            print(f"   ep={s.epoch:3d}  step={s.step:5d}  t={s.elapsed:5.0f}s  "
-                  f"sps={s.steps_per_sec:.1f}")
+        if s.epoch % 20 == 0:
+            print(f"   ep={s.epoch:4d}  step={s.step:6d}  t={s.elapsed:5.0f}s  "
+                  f"sps={s.steps_per_sec:.1f}  loss={s.loss:.4f}")
         last["step"] = s.step
         last["epoch"] = s.epoch
         last["elapsed"] = s.elapsed
@@ -62,7 +62,7 @@ def main() -> None:
     print()
 
     target_full = DEV_TARGET_EPOCHS * steps_per_epoch / max(1e-3, sps)
-    print(f"  reference: dev box (RTX 2070) reaches {DEV_TARGET_EPOCHS} epochs at 20 min.")
+    print(f"  reference: dev box (RTX 4090) reaches {DEV_TARGET_EPOCHS} epochs at 10 min.")
     print(f"  to match the same epoch count on THIS machine:")
     print(f"     train_seconds = {target_full:6.0f} s  ({target_full/60:.1f} min)")
     print()

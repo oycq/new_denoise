@@ -1,0 +1,212 @@
+================================================================================
+archived_recipes.txt — 主干放弃过的去噪方法 / 怎么复活
+================================================================================
+
+本仓库的"主干"曾经长成过几种不同的样子。截至 2026-04-27 后，主干锁定
+为 L1 + 0.01 · TV（见 README）。本文给被替换掉的方法各开一节，记下
+recipe / 关键代码片段 / 复活步骤，让以后想"再试试 paper N2N"的人不用
+从头摸索。
+
+实验过程的连续叙事（16-strategy sweep / 92-candidate grid / 鲁棒推
+之类）依然在 docs/EXPERIMENTS_JOURNEY.md，本文只是"被主干踢出去的
+方法"的快照。
+
+
+================================================================================
+1. paper N2N（CVPR 2021 原配方） — 主干 fd46c6d ↔ 0536c63 之间
+================================================================================
+
+公式
+----
+    L = ‖ f(g₁) − g₂ ‖²  +  γ(t) · ‖ (f(g₁) − g₂) − (g₁(f(y)) − g₂(f(y))) ‖²
+
+  - f：网络（非残差 UNet，输出即去噪结果）
+  - g₁, g₂：N2N 子采样
+  - y：完整 noisy 输入
+  - γ(t)：从 0 线性升到 gamma_final（默认 2.0）
+
+UNet 架构（N2V2 anti-checkerboard 修复版）
+------------------------------------------
+  - 非残差头：denoise(x) = forward(x)，不是 x − forward(x)
+  - BlurPool 下采样：3×3 [1,2,1] 可分离模糊 + avg_pool(2)，替代 max_pool
+  - PixelShuffle 上采样：1×1 conv into 4·c channels + nn.PixelShuffle(2)，
+    替代 stride-2 ConvTranspose2d
+  - depth=3, base=48, 3 conv-3x3 + GELU 双卷积块；输出端 1×1 conv 头
+    用 Kaiming init（不是零初始化，因为非残差头需要"学到东西"）
+
+trainer.py 训练循环关键片段
+---------------------------
+    # γ ramp
+    gamma_t = (elapsed / budget) * cfg.gamma_final
+
+    # N2N pair sampling (fp32)
+    idx1, idx2 = generate_index_pair(batch)
+    g1 = subimage_by_idx(batch, idx1)
+    g2 = subimage_by_idx(batch, idx2)
+
+    with autocast("cuda", enabled=amp_enabled, dtype=amp_dtype):
+        # Reconstruction term
+        den_g1 = model(g1)
+        diff   = den_g1 - g2
+
+        # Consistency regulariser (full-image inference, no grad)
+        with torch.no_grad():
+            full = model(batch)
+            full_g1 = subimage_by_idx(full, idx1)
+            full_g2 = subimage_by_idx(full, idx2)
+        exp_diff = full_g1 - full_g2
+
+        rec_term = (diff ** 2).mean()
+        reg_term = ((diff - exp_diff) ** 2).mean()
+        loss     = rec_term + gamma_t * reg_term
+
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    opt.step()
+
+为什么不再做主干
+----------------
+  - 每个 step 多一次 full-image forward（reg 项），4090 上 sps 砍半
+    （163 vs 290），10 min 等预算下 step 数差 ~1.7×
+  - 公式更优雅、抗 2×2 grid 不需要 TV 强惩罚，但视觉对比里
+    L1+0.01·TV 在 10 min 里就能得到接近的细节保留 + 同样干净的暗区，
+    且训练快一倍，更利于做时长 / 数据扫描。
+  - 如果未来要做更长训练（>30 min）/ 更复杂噪声，paper N2N 的渐进性
+    更好，到时候再切回来。
+
+复活步骤
+--------
+  git checkout fd46c6d -- n2n/ benchmark.py run_train.py train_gui.py
+  (然后接着调 cfg.gamma_final、cfg.intermediate_save_seconds 等)
+
+ckpt 文件命名约定（项目历史里出现过的）
+  checkpoints/paper_n2n_10min.pt    # 10 min wall-clock，main fd46c6d 时代
+  checkpoints/_benchmark.pt         # 60s benchmark 临时输出
+
+
+================================================================================
+2. L1 + 0.05 · VGG perceptual（dc5c068 ↔ fd46c6d 之间）
+================================================================================
+
+公式
+----
+    L = L1(f(g₁), g₂) + 0.05 · ‖ VGG16_feat(f(y)) − VGG16_feat(y) ‖₁
+
+实现要点
+--------
+  - VGG-16 feature L1 + 一些 luma/chroma 项 + EATV，组合在
+    n2n/losses_perceptual.py 里（已删，见 commit b098cd6）
+  - 配套 robust_trainer.py（EMA self-distillation + R2R + 像素掩码 +
+    亚像素抖动），见 bab9f3b
+  - 有个独立入口 train_vgg.py
+
+为什么不再做主干
+----------------
+  - VGG forward 每 step 一次，sps 从 ~160（带 EMA 优化）继续砍半到 ~65
+  - 在 ISO=16 暗区会留下可见的 2×2 grid artifact；尝试 X1-X10 一系列
+    补丁（Gr-Gb 一致性、对角 mode penalty、demosaic L1、cell variance、
+    channel std equalization、bilinear 上采样架构……）都治标不治本。
+  - 最后追根因发现：grid 的真正来源是 N2N 论文一致性正则项缺失，
+    不是 loss 不够"感知"。换 paper N2N 后 grid 自然消失。
+
+复活步骤
+--------
+  git checkout b098cd6 -- n2n/ train_vgg.py
+  python train_vgg.py             # 顶层入口，会同时训 P0_baseline + P4_vgg
+
+
+================================================================================
+3. robust_trainer 路径（EMA + R2R + augmentation）
+================================================================================
+
+bab9f3b 的 n2n/robust_trainer.py 在 N2N main loss 之外加了：
+  - EMA teacher self-distillation（额外一次 teacher forward）
+  - R2R (Residual to Residual) 输入扰动
+  - 像素级掩码避免泄漏
+  - sub-pixel 亚像素抖动 augmentation
+
+总开销：student forward + EMA teacher forward + 各种 augmentation =
+~3× compute / step，4090 上 ~85 sps。视觉收益没有显著大于纯 N2N main，
+最终被 dc5c068 整体删除。EXPERIMENTS_JOURNEY 阶段 6 有 6-candidate
+对比的细节。
+
+复活
+----
+  git show bab9f3b:n2n/robust_trainer.py > n2n/robust_trainer.py
+
+
+================================================================================
+4. 早期 16-strategy sweep（baseline_l1 / charbonnier / multiscale_l1 /
+   l1_plus_grad / huber / unet4_* / ms_l1_charbonnier / l1_plus_tv …）
+================================================================================
+
+c171f66 时代的 sweep，16 个 candidate 比较 blob_residual / hf_noise /
+edge_sharpness / composite。完整 ranking、视觉评估、推荐结果都在
+docs/EXPERIMENTS_JOURNEY.md 阶段 1-2，以及（已删的）docs/REPORT.html。
+
+代码里曾经有过一张 loss 注册表：
+
+    LOSSES = {
+        "l1": l1,
+        "charbonnier": charbonnier,
+        "l1_plus_grad": l1_plus_grad,
+        "multiscale_l1": multiscale_l1,
+        "huber": huber,
+        "l1_plus_tv": l1_plus_tv,
+        "ms_l1_charbonnier": ms_l1_charbonnier,
+    }
+    def get(name): return LOSSES[name]
+
+当时 trainer 通过 cfg.loss_name / loss_kwargs 选 loss。dc5c068 commit
+把整张表 + losses_perceptual.py 一起删了；本次（主干切到 L1+0.01·TV）
+也不打算把表加回来——单一 loss 更省心。
+
+复活某一个 loss
+----------------
+  git show bab9f3b:n2n/losses.py | grep -A 20 "def <name>"
+  把函数体复制到 n2n/trainer.py 里，把训练循环里 F.l1_loss + TV 的那
+  几行替换成 <name>(den, target) 即可。
+
+
+================================================================================
+5. L1 + λ · TV — λ 扫描结果
+================================================================================
+
+主干现在用 lam=0.01。λ 扫描在 4090 / 10-20 min wall-clock / 7 场景
+× ISO 16 视觉对比下：
+
+  λ = 0.05  过强 piecewise-flat，墙面 / 树叶细节明显被 cartoonise
+  λ = 0.03  接近 sweet-spot，但 lens-shading 角落仍偏平整化
+  λ = 0.01  细节保留最佳，平坦区 blob 残留对比 ISP 参考可接受 ✅
+  λ = 0.005 几乎等价纯 L1，dark roof 残留比 0.01 略多
+  λ = 0     纯 L1，参考 baseline，lens-shading 角落 blob 明显
+
+详细 ROI 对比见生成过的 result/compare_duration.html 和
+result/compare.html（gitignore，本地保留）。
+
+要做新的 λ 扫描
+----------------
+trainer 默认 cfg.tv_lambda=0.01，临时改成别的值：
+
+    from dataclasses import replace
+    cfg = replace(TrainConfig(), tv_lambda=0.005, ckpt_path="...")
+    Trainer(cfg).run()
+
+
+================================================================================
+附录 · 哪个 commit 对应哪种主干
+================================================================================
+
+  47ba227   init
+  50bafdd~  early sweep, 16 candidates, registered losses
+  c171f66   adopt MS-Charbonnier + patch256
+  31a8009   敲定 L1 + 0.03·TV，推理 / 评估流程
+  b098cd6   精简到两条路径：L1+0.03·TV + VGG perceptual
+  bab9f3b   robust_trainer 找回 5 项速度优化 (l1+TV 65→120 sps、vgg 45→65 sps)
+  dc5c068   精简到 L1 + 0.05·VGG（删 robust_trainer / loss 注册表）
+  fd46c6d   回到 paper N2N（删 VGG，加一致性正则项，换非残差 UNet）
+  533f741   docs/how_to_compare.txt
+  0536c63   how_to_compare 4.6 节
+  ─────     主干切回 L1 + 0.01·TV（本次提交）
+
+================================================================================

@@ -57,30 +57,31 @@ train_data/
 每个场景至少准备 2 张 `*_raw.png`（一对 sensor2 / sensor3）。
 Bayer 模式必须是 RGGB，黑电平约 ~9 in 0-255 域。
 
-## 3. 跑 3 分钟 benchmark（推荐先做）
+## 3. 跑 1-3 分钟 benchmark（推荐先做）
 
 ```bash
 python benchmark.py
 ```
 
-无参数。3 分钟内跑 N2N 默认配置（L2 + γ·L_reg），最后给出本机 step/sec
-和外推到 10 / 20 min 的训练吞吐量。
+无参数。默认 1 分钟（在 `benchmark.py` 改 `BENCHMARK_SECONDS=180.0`
+跑 3 分钟更准）。跑当前主干 L1 + 0.01·TV，最后给出本机 step/sec 和
+外推到 5 / 10 / 20 min 的训练吞吐量。
 
 ## 4. 真正训练
 
 GUI 版（推荐）：
 
 ```bash
-python run_train.py 600         # 10 分钟（最低稳定值，推荐起点）
-python run_train.py 1200        # 20 分钟
+python run_train.py 600         # 10 分钟（baseline，cost/quality 甜点）
+python run_train.py 1200        # 20 分钟（视觉略好，loss 几乎不变）
 ```
 
-> ⚠️ **训练时长 ≥ 600 s**。非残差 UNet 没有零初始化的恒等先验，
-> 5 min 以下有概率出现"灾难棋盘"（output 是大片彩色 2×2 网格）；
-> 10 min 是稳定区。
+> 5 min 时 loss 已经基本收敛（~0.0162），但视觉上 10 min 在 ISO=16
+> 暗区 / 角落 lens-shading 仍更干净，20 min 边际收益较小。10 min 是
+> baseline，详见 `docs/archived_recipes.txt` 第 5 节的训练时长扫描。
 
 GUI 顶部能调 `data root` / `train`（秒）/ `batch` / `patch` / `lr` / `FP16`。
-点 `Start training`，看 loss 曲线（**rec L2 / reg L2 / total** 三条线，log-log）+
+点 `Start training`，看 loss 曲线（**L1 + λ·TV** 单条，log-log）+
 64×64 noisy/denoised 对比；训练结束后点 `Generate result/ comparison`，
 全量 raw 推理结果会写到 `result/<scene>/<iso>/sensorN_compare.png`。
 
@@ -120,11 +121,14 @@ run_inference_set(
 
 ## 6. 看实验报告
 
-整个项目所有失败和成功的实验来龙去脉在
-[`docs/EXPERIMENTS_JOURNEY.md`](docs/EXPERIMENTS_JOURNEY.md)。
-最重要的一个教训是：**Neighbor2Neighbor 论文的一致性正则项不能省**。
-没这一项的训练等价于普通自监督，会出可见的 2×2 grid artifact，加任何
-mode penalty / VGG perceptual loss 都只是给症状打补丁。
+- [`docs/EXPERIMENTS_JOURNEY.md`](docs/EXPERIMENTS_JOURNEY.md) — 整个项目
+  所有失败 / 成功实验的连续叙事（16-strategy sweep / 92-candidate grid /
+  鲁棒推 / 6-candidate perceptual）。
+- [`docs/archived_recipes.txt`](docs/archived_recipes.txt) — 主干放弃过的
+  方法（paper N2N、L1+VGG、robust_trainer、multi-scale 等）的 recipe
+  快照 + 复活步骤。
+- [`docs/how_to_compare.txt`](docs/how_to_compare.txt) — 怎么写一份对比
+  HTML 报告（多 ckpt 推理、ROI 切片、HTML 模板风格）。
 
 ## 7. 常见问题
 
@@ -135,18 +139,20 @@ patch_size 也可以从 256 降到 192 / 128 解决。
 **Q：sps 比预期低**
 A：先确认 `torch.cuda.is_available()` 返回 True；其次 `cudnn.benchmark = True`
 （trainer 已经设了）。FP16 必须开（默认开），关掉会慢一倍。
+torch.compile 也很关键：4090 上从 ~150 sps 跳到 ~290 sps，需要
+`triton==3.1.0` 与 `torch 2.5.x` 配套。
 
 **Q：训练 loss 不下降**
-A：N2N 训练特点。看 `rec` 项（自监督下界 ≈ 噪声地板），不要看 `total`——
-`reg` 项随 γ 增大而被放大，单条曲线很难判断收敛。GUI 的 log-log 图
-把三条线画在一起就是为了直观看趋势。
-
-**Q：训练结果出现彩色 2×2 棋盘**
-A：训练时间不够。非残差 UNet 没有零初始化恒等先验，需要至少 10 min
-才能稳定收敛。如果训练时长 ≥ 600 s 但仍然出现，检查
-`TrainConfig.gamma_final` 是不是被改成 0 了——一致性正则项是消除
-2×2 grid 的核心。
+A：L1+TV 在 RTX 4090 上 ~5 min 时 loss 已基本平台（~0.0162），后面
+几乎不再下降。**loss 平台 ≠ 视觉到顶**——10 min 在暗区 / lens-shading
+角落比 5 min 明显更干净，20 min 仍有微小提升。看 result/ 里的全图
+对比比看 loss 数字更靠谱。
 
 **Q：去噪后大平面有色阶 / 锯齿**
 A：检查 `n2n/raw_utils.py` 是否完整（应该有 `raw_to_linear_bgr` 函数）。
 旧版本在 demosaic 之前 `astype(uint8)` 会触发这个 bug。
+
+**Q：去噪后 lens-shading 角落仍有低频 blob**
+A：`tv_lambda` 从 0.01 调到 0.02 / 0.03 试试（强 TV → 平坦区干净，
+但代价是细节被吃掉，所以要看 ROI 视觉效果决定）。详见
+`docs/archived_recipes.txt` 第 5 节的 λ 扫描。

@@ -125,14 +125,7 @@ class InferWorker(QtCore.QObject):
 # GUI widgets
 # ---------------------------------------------------------------------------
 class LossPlot(FigureCanvas):
-    """Per-epoch loss plot with three log-log curves: rec / reg / total.
-
-    ``rec`` is the reconstruction term ‖f(g₁) − g₂‖² that drives toward
-    the N2N noise floor; ``reg`` is the consistency regulariser
-    ‖(f(g₁)−g₂) − (g₁(f(y))−g₂(f(y)))‖² which keeps the network's
-    sub-sampled and full-image inferences aligned (eliminates the
-    2×2-grid artefact that residual + L1 setups produced).
-    """
+    """Per-epoch L1 + λ·TV loss plot (log-log)."""
 
     def __init__(self, parent=None):
         fig = Figure(figsize=(4.5, 3.5))
@@ -145,46 +138,31 @@ class LossPlot(FigureCanvas):
         self.ax.set_ylabel("mean loss (log)")
         self.ax.set_title("per-epoch training loss (log-log)")
         self.ax.grid(True, which="both", linestyle=":", alpha=0.4)
-        (self._rec_line,) = self.ax.plot(
-            [], [], color="#1f77b4", linewidth=1.6, marker="o", markersize=4, label="rec L2"
-        )
-        (self._reg_line,) = self.ax.plot(
-            [], [], color="#d62728", linewidth=1.2, marker="x", markersize=4, label="reg L2"
-        )
-        (self._total_line,) = self.ax.plot(
-            [], [], color="#7f7f7f", linewidth=0.8, linestyle="--", label="rec + γ·reg"
+        (self._loss_line,) = self.ax.plot(
+            [], [], color="#1f77b4", linewidth=1.6, marker="o", markersize=4,
+            label="L1 + λ·TV",
         )
         self.ax.legend(loc="upper right", fontsize=8)
         self._xs: list[int] = []
-        self._rec: list[float] = []
-        self._reg: list[float] = []
-        self._total: list[float] = []
+        self._losses: list[float] = []
         fig.tight_layout()
 
-    def append(self, epoch: int, rec: float, reg: float, total: float):
-        if not np.isfinite(rec) or not np.isfinite(total):
+    def append(self, epoch: int, loss: float):
+        if not np.isfinite(loss):
             return
         self._xs.append(epoch)
-        self._rec.append(max(rec, 1e-9))
-        self._reg.append(max(reg, 1e-9))
-        self._total.append(max(total, 1e-9))
-        self._rec_line.set_data(self._xs, self._rec)
-        self._reg_line.set_data(self._xs, self._reg)
-        self._total_line.set_data(self._xs, self._total)
+        self._losses.append(max(loss, 1e-9))
+        self._loss_line.set_data(self._xs, self._losses)
         self.ax.set_xlim(max(1, self._xs[0]), max(2, self._xs[-1] * 1.1))
-        ys = self._rec + self._reg + self._total
-        lo = max(min(ys) * 0.6, 1e-6)
-        hi = max(ys) * 1.4
+        lo = max(min(self._losses) * 0.6, 1e-6)
+        hi = max(self._losses) * 1.4
         self.ax.set_ylim(lo, hi)
         self.draw_idle()
 
     def reset(self):
         self._xs.clear()
-        self._rec.clear()
-        self._reg.clear()
-        self._total.clear()
-        for ln in (self._rec_line, self._reg_line, self._total_line):
-            ln.set_data([], [])
+        self._losses.clear()
+        self._loss_line.set_data([], [])
         self.draw_idle()
 
 
@@ -441,11 +419,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(object)
     def on_step(self, info: StepInfo):
-        self.loss_plot.append(info.epoch, info.rec_loss, info.reg_loss, info.loss)
+        self.loss_plot.append(info.epoch, info.loss)
         self.step_label.setText(
             f"epoch {info.epoch}  step {info.step}  "
-            f"rec {info.rec_loss:.5f}  reg {info.reg_loss:.5f}  γ {info.gamma:.2f}  "
-            f"total {info.loss:.5f}  ({info.steps_per_sec:.1f} it/s)"
+            f"loss {info.loss:.5f}  ({info.steps_per_sec:.1f} it/s)"
         )
 
     @QtCore.pyqtSlot(str)

@@ -707,3 +707,56 @@ fix，方案降到极简：
    只有从训练目标层面消除分裂源才根治。
 4. **非残差网络对训练时长敏感**。残差网络的零初始化"恒等"先验是
    重要安全网；去掉以后必须保证训练时间够长。
+
+
+## 阶段 8：主干换回 L1 + 0.01 · TV
+
+### 背景
+
+阶段 7 把主干切到了 paper N2N，结果好，但每个 step 多算一次整图
+forward（一致性正则项），4090 上稳态从 ~290 sps 砍到 ~163 sps。
+这次想做"训练时长扫描" + "λ 扫描" + "数据规模扫描"等多轮快速实验时，
+sps 差一倍 = 实验吞吐慢一倍。
+
+回头看视觉效果：在 7 个场景 × ISO 16 的高噪声测试集上，
+
+| 配方 | 10 min wall-clock 后视觉 |
+|---|---|
+| paper N2N | 干净，但暗区还有微小 blob |
+| L1 + 0.05·TV | 过度 piecewise-flat，墙面 / 树叶细节明显被 cartoonise |
+| L1 + 0.03·TV | 接近 sweet-spot，但 lens-shading 角落仍偏平整化 |
+| **L1 + 0.01·TV** | **细节保留最佳，平坦区 blob 残留对比 ISP 参考可接受** |
+| L1 + 0.005·TV | 几乎等价纯 L1，dark roof 残留比 0.01 略多 |
+
+L1+0.01·TV 在 10 min 内已经达到与 paper N2N 相当的视觉清洁度，且训练
+快近一倍，做实验更利索。
+
+5 / 10 / 20 min 训练时长扫描（同样 lam=0.01）：
+- 5 min  loss=0.0162  暗区有可见 blob
+- 10 min loss=0.0160  暗区显著改善，~5-10% 视觉提升
+- 20 min loss=0.0156  比 10 min 微小提升，边际收益小
+
+10 min 是 cost / quality 的甜点，定为 baseline。
+
+### 决策
+
+主干代码切回 L1 + 0.01·TV：
+
+- `n2n/model.py` 用残差头版本（`denoise(x) = x − forward(x)`，零初始化输出
+  端，对 600 s 预算特别友好）；不再用 N2V2 anti-checkerboard 修复版
+  （只在 paper N2N 路径下需要）。
+- `n2n/trainer.py` 简化成单一 loss 路径：`l1 + tv_lambda * tv`，loss 函数
+  内联，`StepInfo` 只剩一个 `loss` 字段，去掉 loss 注册表 / `gamma_final` /
+  `subtract_black_level` / `n2n_lambda` 等不再用的开关。
+- `train_gui.py` 的 `LossPlot` 从三条线（rec / reg / total）简化成单条。
+- 被替换掉的方法（paper N2N、L1+VGG、robust_trainer 等）全部沉淀到
+  `docs/archived_recipes.txt`，包括完整 recipe / 复活 commit。
+
+### 教训
+
+5. **方法选择要平衡 sps 与视觉收益**。paper N2N 公式更优雅、抗 grid
+   不需要 TV 强惩罚，但视觉收益不到 10%、sps 砍半，做日常迭代不划算。
+6. **loss 平台 ≠ 视觉到顶**。L1+TV 在 5 min 时 loss 已经平台，但 10 min
+   视觉上仍明显更干净。看视觉对比比看 loss 数字更靠谱。
+7. **简化主干 + 文档归档**比保留多种代码路径更利于维护。复活某种老
+   方法只需要 git checkout 历史 commit + 看 archived_recipes.txt。

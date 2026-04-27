@@ -1,27 +1,8 @@
-"""U-Net for raw Bayer denoising, following Neighbor2Neighbor (CVPR 2021).
+"""Small U-Net for raw denoising.
 
-The architecture matches the official N2N implementation
-(github.com/TaoHuang2018/Neighbor2Neighbor) plus the two N2V2 (Hoeck et al.,
-2022) anti-checkerboard fixes that the project's experimentation
-confirmed (see ``docs/EXPERIMENTS_JOURNEY.md``):
-
-* **BlurPool downsample** (instead of max-pool). Max-pool aliases — it
-  picks the max of 4 random samples and locks to one of 4 phases per
-  2×2 cell, which on real Bayer raw shows up as a visible 2×2 grid in
-  flat dark regions. A 3-tap [1,2,1] separable blur followed by avg-pool
-  is anti-aliased and removes the lock.
-* **PixelShuffle upsample** (instead of ``ConvTranspose2d(c, c, 2, stride=2)``).
-  Stride-2 transpose convolution is the textbook checkerboard-artefact
-  source (https://distill.pub/2016/deconv-checkerboard/). PixelShuffle
-  feeds an unstrided 1×1 conv into a deterministic channel→space
-  rearrangement and avoids any phase the network could exploit.
-* **Non-residual output head**. The N2V2 paper showed that residual
-  heads (``denoised = input − net(input)``) accumulate a 2×2 grid in
-  blind-spot / N2N self-supervised setups. Predicting the denoised
-  image directly avoids that. The cost is sensitivity to short
-  training runs (no zero-init identity prior) — the project's
-  ``tmp4/`` experiments showed 5 minutes is unreliable, 10+ minutes
-  is stable.
+Designed to fit comfortably in 8 GB GPU memory under FP16 with batch size
+4-8 at 128x128 patch size. Predicts a *noise residual*: the final denoised
+image is ``input - model(input)``.
 """
 from __future__ import annotations
 
@@ -44,52 +25,13 @@ class _DoubleConv(nn.Module):
         return self.block(x)
 
 
-class _PixelShuffleUp(nn.Module):
-    """2× upsample via 1×1 conv into 4·c channels then PixelShuffle.
-
-    Mathematically equivalent to a learned 2×2 deconvolution but
-    parameterised as a 1×1 conv on the input followed by a
-    deterministic re-arrangement, which empirically avoids the per-2×2
-    phase patterns that ConvTranspose2d's stride-2 layout invites.
-    """
-
-    def __init__(self, ch: int):
-        super().__init__()
-        self.conv = nn.Conv2d(ch, ch * 4, 1, bias=True)
-        self.shuf = nn.PixelShuffle(2)
-
-    def forward(self, x):
-        return self.shuf(self.conv(x))
-
-
-class _BlurDown(nn.Module):
-    """Anti-aliased 2× downsample: 3-tap [1,2,1] separable blur + avg-pool 2."""
-
-    def __init__(self):
-        super().__init__()
-        k = torch.tensor([[1., 2., 1.],
-                          [2., 4., 2.],
-                          [1., 2., 1.]]) / 16.0
-        self.register_buffer("kernel", k.view(1, 1, 3, 3), persistent=False)
-
-    def forward(self, x):
-        n, c, h, w = x.shape
-        k = self.kernel.expand(c, 1, 3, 3).to(x.dtype)
-        x = F.conv2d(x, k, padding=1, groups=c)
-        return F.avg_pool2d(x, 2)
-
-
 class UNet(nn.Module):
-    """Configurable-depth encoder–decoder with skip connections.
+    """Configurable-depth encoder-decoder with skip connections, residual head.
 
-    The output is the **denoised image directly** — there is no residual
-    subtraction at the head (cf. N2V2 anti-checkerboard fix). At inference
-    callers can use either ``model(x)`` or ``model.denoise(x)``; both return
-    the denoised packed RGGB image.
-
-    ``depth=3`` (default) gives the small UNet that converges in ~10 min on
-    a 4090 and avoids the "blob"-shaped low-frequency residuals the deeper
-    variant produces at small training patches.
+    ``depth=3`` (default) gives the local-feature small UNet that avoided
+    "blob"-shaped low-freq residuals at small training patches; ``depth=4``
+    is the standard N2N config which works fine when the patch is large
+    enough (e.g. 256+).
     """
 
     def __init__(
@@ -114,27 +56,25 @@ class UNet(nn.Module):
         self.ups = nn.ModuleList()
         self.decs = nn.ModuleList()
         for i in reversed(range(depth)):
-            in_up = chs[i + 1]
-            self.ups.append(_PixelShuffleUp(in_up))
+            in_up = chs[i + 1] if i == depth - 1 else chs[i + 1]
+            self.ups.append(nn.ConvTranspose2d(in_up, in_up, 2, stride=2))
             self.decs.append(_DoubleConv(in_up + chs[i], chs[i] if i > 0 else base))
 
         self.out_conv = nn.Conv2d(base, out_ch, 1)
-        # Default PyTorch Kaiming init on the head — non-residual networks
-        # need the head to learn a real mapping, not start at zero.
-        self.blur = _BlurDown()
+        # Residual head near zero -> network starts as identity.
+        nn.init.zeros_(self.out_conv.weight)
+        nn.init.zeros_(self.out_conv.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         skips = []
         cur = x
         for i, enc in enumerate(self.encs):
-            cur = enc(cur if i == 0 else self.blur(cur))
+            cur = enc(cur if i == 0 else F.max_pool2d(cur, 2))
             skips.append(cur)
-        cur = self.bottleneck(self.blur(cur))
+        cur = self.bottleneck(F.max_pool2d(cur, 2))
         for up, dec, skip in zip(self.ups, self.decs, reversed(skips)):
             cur = dec(torch.cat([up(cur), skip], dim=1))
         return self.out_conv(cur)
 
     def denoise(self, x: torch.Tensor) -> torch.Tensor:
-        """Alias for :meth:`forward` — kept for callers that previously
-        relied on the residual-head ``denoise = x - forward(x)`` pattern."""
-        return self.forward(x)
+        return x - self.forward(x)
