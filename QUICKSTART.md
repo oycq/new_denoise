@@ -57,15 +57,16 @@ train_data/
 每个场景至少准备 2 张 `*_raw.png`（一对 sensor2 / sensor3）。
 Bayer 模式必须是 RGGB，黑电平约 ~9 in 0-255 域。
 
-## 3. 跑 1-3 分钟 benchmark（推荐先做）
+## 3. 跑 1 分钟 benchmark（推荐先做）
 
 ```bash
 python benchmark.py
 ```
 
-无参数。默认 1 分钟（在 `benchmark.py` 改 `BENCHMARK_SECONDS=180.0`
-跑 3 分钟更准）。跑当前主干 L1 + 0.01·TV，最后给出本机 step/sec 和
-外推到 5 / 10 / 20 min 的训练吞吐量。
+无参数，默认 1 分钟。跑当前主干 L1 + 0.01·TV，过滤掉前 30 s 的
+`torch.compile` 首编译期，报告 **稳态 sps**（warmup 后 epoch 的中位数）+
+外推到 5 / 10 / 20 min 的训练吞吐量。整体平均 sps 在 1 min 测试里会被
+~30 s 的编译期严重拉低，所以这里直接给稳态。
 
 ## 4. 真正训练
 
