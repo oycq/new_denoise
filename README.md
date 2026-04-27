@@ -143,7 +143,9 @@ new_denoise/
 ├── docs/
 │   ├── EXPERIMENTS_JOURNEY.md        # 整个项目的来龙去脉 + 经验
 │   ├── archived_recipes.txt          # 主干放弃过的方法（paper N2N / VGG / robust / 等）
-│   └── how_to_compare.txt            # 怎么写一份对比 HTML 报告
+│   ├── how_to_compare.txt            # 怎么写一份对比 HTML 报告
+│   └── how_to_run_benchmark.txt      # 怎么把 ckpt 拿去 ysstereo 跑评估指标
+├── export_l1tv_onnx.py               # 导出单通道 (1,1,H,W) ONNX 给 ysstereo
 ├── requirements.txt
 ├── README.md                         # （本文件）
 ├── QUICKSTART.md                     # 部署到新机器的步骤
