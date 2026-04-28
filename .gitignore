@@ -1,4 +1,4 @@
-﻿# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Build / runtime artefacts
 # ---------------------------------------------------------------------------
 __pycache__/
@@ -11,6 +11,21 @@ __pycache__/
 checkpoints/
 result/
 result_*/
+
+# Model weight blobs are big and regenerable; ignore by default.
+# The stereo-depth weights are an exception: they're a stable, vendored
+# third-party asset (89 MB) that doesn't change across denoiser iterations,
+# so it lives in the repo to make `git clone` + `python benchmark/run.py`
+# work out of the box. The denoiser ONNX is the *artefact under test* and
+# updates every training run — ship those out-of-band, don't track.
+*.pth
+*.onnx
+!benchmark/depth/weights.pth
+
+# ---------------------------------------------------------------------------
+# benchmark/ pipeline outputs (regenerable; big — ~400 MB of PNGs per run)
+# ---------------------------------------------------------------------------
+benchmark/output/
 
 # ---------------------------------------------------------------------------
 # Local-only archive of every artefact / intermediate the project produced

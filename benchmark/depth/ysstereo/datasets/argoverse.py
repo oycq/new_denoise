@@ -1,0 +1,82 @@
+import os.path as osp
+from glob import glob
+
+from ysstereo.datasets.basedataset import BaseStereoDataset
+from ysstereo.registry import DATASETS
+
+@DATASETS.register_module()
+class Argoverse(BaseStereoDataset):
+    """Argoverse dataset for training. 
+
+    Args:
+    """
+
+    def __init__(self,
+                 sky=False,
+                 *args,
+                 **kwargs) -> None:
+        self.sky =sky
+        setattr(self, self.UNIQUE_NAME_KEY, 'sky' if self.sky else 'nosky')
+        super().__init__(*args, **kwargs)
+
+    def load_data_info(self) -> None:
+        """Load data information, including file path of image1, image2 and
+        disparity."""
+        self._get_data_dir()
+
+        img1_filenames = []
+        img2_filenames = []
+        disp_filenames = []
+
+        for idir1, idir2, ddir in zip(self.img1_dir, self.img2_dir,
+                                        self.disp_dir):
+
+            img1_filenames += self.get_data_filename(idir1, self.img1_suffix)
+            img1_filenames.sort()
+
+            img2_filenames += self.get_data_filename(idir2, self.img2_suffix)
+            img2_filenames.sort()
+
+            disp_filenames += self.get_data_filename(ddir, self.disp_suffix)
+            disp_filenames.sort()
+
+        self.load_img_info(self.data_infos, img1_filenames, img2_filenames)
+
+        self.load_ann_info(self.data_infos, disp_filenames, 'filename_disp')
+
+    def _get_data_dir(self) -> None:
+        """Get the paths for stereo images and disparity."""
+
+        self.disp_suffix = '.png'
+        self.img1_suffix = '.jpg'
+        self.img2_suffix = '.jpg'
+
+        img1s_dirs = []
+        img2s_dirs = []
+        disp_dirs = []
+
+        img1s_dirs_ = glob(
+            osp.join(self.data_root, 'rectified_stereo_images_v1.1/train/*/stereo_front_left_rect'))
+        img1s_dirs += img1s_dirs_
+        img1s_dirs_ = glob(
+            osp.join(self.data_root, 'rectified_stereo_images_v1.1/val/*/stereo_front_left_rect'))
+        img1s_dirs += img1s_dirs_
+
+        img2s_dirs_ = glob(
+            osp.join(self.data_root, 'rectified_stereo_images_v1.1/train/*/stereo_front_right_rect'))
+        img2s_dirs += img2s_dirs_
+        img2s_dirs_ = glob(
+            osp.join(self.data_root, 'rectified_stereo_images_v1.1/val/*/stereo_front_right_rect'))
+        img2s_dirs += img2s_dirs_
+
+        if self.sky:
+            disp_dirs_ = glob(
+                osp.join(self.data_root, 'disparity_maps_v1.1_sky/*/*/stereo_front_left_rect_disparity'))
+        else:
+            disp_dirs_ = glob(
+            osp.join(self.data_root, 'disparity_maps_v1.1/*/*/stereo_front_left_rect_disparity'))
+        disp_dirs += disp_dirs_
+
+        self.img1_dir = img1s_dirs
+        self.img2_dir = img2s_dirs
+        self.disp_dir = disp_dirs
