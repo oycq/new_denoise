@@ -27,7 +27,7 @@ L = L1(f(g₁), g₂)  +  0.01 · TV(f(g₁))
 
 ```bash
 pip install -r requirements.txt
-python benchmark.py             # 跑 1 min，报告 torch.compile 之后的稳态 sps
+python speedtest.py             # 跑 1 min，报告 torch.compile 之后的稳态 sps
 python run_train.py 600         # 启 GUI 训 10 min
 ```
 
@@ -139,7 +139,7 @@ new_denoise/
 │   └── infer.py                      # tile 推理 + ImageJ-stack 输出
 ├── run_train.py                      # 一键启 GUI
 ├── train_gui.py                      # PyQt5 GUI 实现
-├── benchmark.py                      # 1 分钟吞吐量基准（稳态 sps）
+├── speedtest.py                      # 1 分钟训练吞吐量测试（稳态 sps）
 ├── docs/
 │   ├── EXPERIMENTS_JOURNEY.md        # 整个项目的来龙去脉 + 经验
 │   ├── archived_recipes.txt          # 主干放弃过的方法（paper N2N / VGG / robust / 等）

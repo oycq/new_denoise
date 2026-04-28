@@ -501,7 +501,7 @@ new_denoise/
 ├── README.md                       # 项目入口
 ├── QUICKSTART.md                   # 新机器部署
 ├── requirements.txt
-├── benchmark.py                    # 3 min 吞吐量基准
+├── speedtest.py                    # 1 min 训练吞吐量测试
 ├── run_train.py                    # 一键启 GUI（默认 L1+0.03·TV）
 ├── train_gui.py                    # PyQt5 GUI
 │
@@ -521,7 +521,7 @@ new_denoise/
 ├── run_train.py                    # 一键启 GUI（生产 baseline）
 ├── train_vgg.py                    # ★ 一键训 P0_baseline + P4_vgg
 ├── train_gui.py                    # PyQt5 GUI 实现
-├── benchmark.py                    # 3 分钟吞吐量基准
+├── speedtest.py                    # 1 分钟训练吞吐量测试
 │
 ├── docs/
 │   └── EXPERIMENTS_JOURNEY.md      # （本文件）整个项目的来龙去脉
@@ -611,7 +611,7 @@ samples_per_epoch = 1024  →  ~170 step/epoch  →  3.0–3.5 s/epoch
 20 min 训练 ≈ 350 epoch (baseline) / 280 epoch (VGG)
 ```
 
-新机器先 `python benchmark.py` 跑 3 min 看实测 sps，再调 `train_seconds`。
+新机器先 `python speedtest.py` 跑 1 min 看实测 sps，再调 `train_seconds`。
 
 ### Ampere+ 自动启用的优化
 

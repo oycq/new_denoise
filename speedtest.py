@@ -1,10 +1,12 @@
-"""1-minute throughput benchmark.
+"""1-minute throughput speedtest.
 
 无参数运行。报告的是 ``torch.compile`` 首编译期之后的 **稳态** sps
 （取所有 warmup 后 epoch 的中位数），而不是含 warmup 的整体平均——
 后者会被 1 min 测试里 ~30 s 的编译期严重拉低，参考意义不大。
 
-    python benchmark.py
+注意：本脚本只测训练吞吐量，与 ``benchmark/`` 目录下的双目深度降噪评估无关。
+
+    python speedtest.py
 """
 from __future__ import annotations
 
@@ -24,9 +26,9 @@ def main() -> None:
         TrainConfig(),
         train_seconds=BENCHMARK_SECONDS,
         intermediate_save_seconds=(),
-        ckpt_path="checkpoints/_benchmark.pt",
+        ckpt_path="checkpoints/_speedtest.pt",
     )
-    print(f"=== benchmark · L1 + {cfg.tv_lambda}*TV · "
+    print(f"=== speedtest · L1 + {cfg.tv_lambda}*TV · "
           f"patch={cfg.patch_size} batch={cfg.batch_size} depth={cfg.unet_depth} ===")
     print(f"  data_root      : {cfg.data_root}")
     print(f"  duration       : {cfg.train_seconds:.0f}s")

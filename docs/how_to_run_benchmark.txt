@@ -74,7 +74,7 @@ n2n/model.py 的 `UNet.forward` 输出"噪声残差"，`UNet.denoise(x) = x - fo
 3. 一键导出脚本 export_l1tv_onnx.py
 ================================================================================
 
-仓库里有 `export_l1tv_onnx.py`（持久脚本，跟 `benchmark.py` 平级），
+仓库里有 `export_l1tv_onnx.py`（持久脚本，跟 `speedtest.py` 平级），
 默认从 `checkpoints/l1tv_lam01_10min.pt` 导成
 `checkpoints/l1tv_lam01_10min.onnx`，分辨率 1280×1088，opset 11:
 

@@ -57,10 +57,10 @@ train_data/
 每个场景至少准备 2 张 `*_raw.png`（一对 sensor2 / sensor3）。
 Bayer 模式必须是 RGGB，黑电平约 ~9 in 0-255 域。
 
-## 3. 跑 1 分钟 benchmark（推荐先做）
+## 3. 跑 1 分钟 speedtest（推荐先做）
 
 ```bash
-python benchmark.py
+python speedtest.py
 ```
 
 无参数，默认 1 分钟。跑当前主干 L1 + 0.01·TV，过滤掉前 30 s 的
