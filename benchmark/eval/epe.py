@@ -1,27 +1,29 @@
 """Aggregate per-frame stereo disparity into a single benchmark score.
 
-Input:
-    A directory of disparity PNGs named ``<scenario>_<gain>_<denoise>.png``
-    where ``denoise ∈ {0, 1}`` and ``gain ∈ {1, 2, 3, 4, 6, 8, 10, 12, 14, 16}``
-    (ISO = gain · 100). The PNG values are disparity · 100 in uint16.
+Input
+-----
+A directory of disparity PNGs named ``<scenario>_<gain>_<denoise>.png`` where
+``denoise ∈ {0, 1}`` and ``gain ∈ {1, 2, 3, 4, 6, 8, 10, 12, 14, 16}``
+(ISO = gain · 100). PNG values are disparity · 100 in uint16.
 
-What it computes:
-    - For each scenario / ISO, EPE (mean abs diff vs that scenario's
-      ``ISO=100, denoise=<same>`` reference image), in pixels.
-    - "Score" = average EPE at ISO = HIGHLIGHT_ISO across all scenarios,
-      taken on the *denoised* branch.
-    - "QC" = average over scenarios of the cross-EPE between the
-      ``ISO=100 / denoise=0`` and ``ISO=100 / denoise=1`` images. If the
-      denoiser is well-behaved at clean ISO=100, this stays small (< 0.6).
-      Failing QC means the score is suppressed.
+Metric
+------
+Per scene, the **single baseline** is the clean ``(iso=100, denoise=0)``
+disparity image. Every other frame in that scene — including the denoised
+ISO=100 image — is compared against that one baseline:
 
-A 3x3 ``Summary_Depth_EPE_Final.png`` plot (8 scenes + global average) is
-saved alongside the structured result for human inspection.
+    EPE(scene, iso, k) = mean | disp(scene, iso, k) - disp(scene, 100, 0) | / 100
+
+The benchmark **score** is the mean of ``EPE(scene, iso, denoise=1)`` across
+all scenes and all ISOs in ``[100..MAX_ISO]``. One number, lower is better.
+
+The no-denoise EPE curve is still drawn on the summary plot for visual
+context (it's the "what the depth net would do without us"), but it does
+not enter the score.
 """
 from __future__ import annotations
 
 import glob
-import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -30,10 +32,10 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-HIGHLIGHT_ISO = 1000
 MAX_ISO = 1600
-QC_THRESHOLD = 0.6
 Y_LIMIT = 1.5
+BASELINE_ISO = 100
+
 
 def _pick_cjk_fonts() -> list[str]:
     """Return matplotlib font-family names that actually resolve on this box.
@@ -69,12 +71,9 @@ plt.rcParams["axes.unicode_minus"] = False
 
 @dataclass
 class EvalResult:
-    qc_pass: bool
-    score: Optional[float]            # mean denoise EPE at HIGHLIGHT_ISO
-    iso100_delta: Optional[float]     # mean cross-EPE at ISO=100
-    qc_threshold: float = QC_THRESHOLD
-    per_scene: list = field(default_factory=list)  # list of dict per scene
-    avg: dict = field(default_factory=dict)
+    score: Optional[float]                          # mean denoised EPE
+    per_scene: list = field(default_factory=list)   # list of dict per scene
+    avg: dict = field(default_factory=dict)         # global mean curves
     plot_path: Optional[str] = None
 
     def to_dict(self):
@@ -107,19 +106,25 @@ def _epe(img: np.ndarray, gt: np.ndarray) -> float:
 
 
 def _process_scene(records: list[dict]) -> dict:
-    gt0 = next((d for d in records if d["iso"] == 100 and d["denoise"] == 0), None)
-    gt1 = next((d for d in records if d["iso"] == 100 and d["denoise"] == 1), None)
-    img_gt0 = _load_disp(gt0["path"]) if gt0 else None
-    img_gt1 = _load_disp(gt1["path"]) if gt1 else None
-    if img_gt0 is None and img_gt1 is None:
+    """Compute EPE vs the single ``(iso=BASELINE_ISO, denoise=0)`` reference.
+
+    Returns a dict with two parallel curves (orig and denoised) suitable
+    for the per-scene plot, plus convenience scene-level means.
+    """
+    ref_rec = next(
+        (r for r in records
+         if r["iso"] == BASELINE_ISO and r["denoise"] == 0),
+        None,
+    )
+    if ref_rec is None:
+        return {}
+    ref = _load_disp(ref_rec["path"])
+    if ref is None:
         return {}
 
     table: dict[int, dict[int, float]] = {}
     for r in records:
         if r["iso"] > MAX_ISO:
-            continue
-        ref = img_gt1 if r["denoise"] == 1 else img_gt0
-        if ref is None:
             continue
         cur = _load_disp(r["path"])
         if cur is None:
@@ -134,12 +139,15 @@ def _process_scene(records: list[dict]) -> dict:
         if 1 in table[i]:
             out["x_dn"].append(i); out["y_dn"].append(table[i][1])
 
-    if img_gt0 is not None and img_gt1 is not None:
-        out["iso100_cross_epe"] = float(np.mean(np.abs(img_gt0 - img_gt1)) / 100.0)
+    out["mean_orig"] = (float(np.mean(out["y_orig"]))
+                        if out["y_orig"] else None)
+    out["mean_dn"]   = (float(np.mean(out["y_dn"]))
+                        if out["y_dn"] else None)
     return out
 
 
 def _global_average(per_scene: list[dict]) -> dict:
+    """Average EPE per ISO across all scenes (for the 'global' subplot)."""
     bucket: dict[int, dict[int, list[float]]] = {}
     for d in per_scene:
         for x, y in zip(d["x_orig"], d["y_orig"]):
@@ -152,26 +160,30 @@ def _global_average(per_scene: list[dict]) -> dict:
             avg["x_orig"].append(k); avg["y_orig"].append(float(np.mean(bucket[k][0])))
         if bucket[k][1]:
             avg["x_dn"].append(k); avg["y_dn"].append(float(np.mean(bucket[k][1])))
-    cross = [d["iso100_cross_epe"] for d in per_scene if "iso100_cross_epe" in d]
-    if cross:
-        avg["iso100_cross_epe"] = float(np.mean(cross))
+    avg["mean_orig"] = (float(np.mean(avg["y_orig"]))
+                        if avg["y_orig"] else None)
+    avg["mean_dn"]   = (float(np.mean(avg["y_dn"]))
+                        if avg["y_dn"] else None)
     return avg
 
 
-def _epe_at(data: dict, iso: int) -> dict:
-    out = {"orig": None, "dn": None}
-    for x, y in zip(data.get("x_orig", []), data.get("y_orig", [])):
-        if x == iso:
-            out["orig"] = float(y); break
-    for x, y in zip(data.get("x_dn", []), data.get("y_dn", [])):
-        if x == iso:
-            out["dn"] = float(y); break
-    return out
+def _score_from_per_scene(per_scene: list[dict]) -> Optional[float]:
+    """Pool every denoised EPE across all scenes & ISOs into one mean.
+
+    This is *not* the same as ``mean(scene_means)`` if scenes have different
+    ISO coverage; flattening gives every (scene, iso) sample equal weight,
+    which matches the user-facing definition: "average diff across denoised
+    ISO 100..1600".
+    """
+    samples = []
+    for s in per_scene:
+        samples.extend(s["y_dn"])
+    return float(np.mean(samples)) if samples else None
 
 
 def _plot_subplot(ax, data, title, is_average=False):
     if data["x_orig"]:
-        ax.plot(data["x_orig"], data["y_orig"], label="原始",
+        ax.plot(data["x_orig"], data["y_orig"], label="无降噪",
                 marker="o", color="blue", linewidth=1.5, markersize=5)
     if data["x_dn"]:
         ax.plot(data["x_dn"], data["y_dn"], label="降噪",
@@ -179,22 +191,17 @@ def _plot_subplot(ax, data, title, is_average=False):
     ax.set_title(title, fontsize=11, fontweight="bold")
     ax.set_ylim(0, Y_LIMIT)
     ax.set_xlabel("ISO", fontsize=9)
-    ax.set_ylabel("EPE (Pixel)", fontsize=9)
+    ax.set_ylabel("EPE vs ISO=100 无降噪 (Pixel)", fontsize=9)
     ax.grid(True, linestyle="--", alpha=0.6)
 
-    e = _epe_at(data, HIGHLIGHT_ISO)
-    if e["orig"] is not None or e["dn"] is not None:
-        ax.axvline(HIGHLIGHT_ISO, color="gray", linestyle=":", alpha=0.7)
-        for key, color in (("orig", "blue"), ("dn", "red")):
-            if e[key] is not None:
-                ax.scatter([HIGHLIGHT_ISO], [e[key]], color=color, s=60,
-                           edgecolor="white", linewidth=1.2, zorder=5)
-
-    cross = data.get("iso100_cross_epe")
-    if cross is not None:
-        ax.scatter([100], [cross], color="purple", marker="D", s=42,
-                   edgecolor="white", linewidth=1.0, zorder=5,
-                   label=f"ISO=100 降噪Δ={cross:.3f}")
+    mean_dn = data.get("mean_dn")
+    if mean_dn is not None:
+        ax.axhline(mean_dn, color="red", linestyle=":", linewidth=1, alpha=0.6)
+        ax.text(0.98, 0.97, f"降噪平均\n{mean_dn:.4f}",
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=8.5,
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
+                          edgecolor="#888", alpha=0.9))
 
     if is_average:
         for sp in ax.spines.values():
@@ -202,7 +209,7 @@ def _plot_subplot(ax, data, title, is_average=False):
     ax.legend(fontsize=8, loc="upper left")
 
 
-def _save_summary_plot(per_scene, avg, score, qc_pass, out_path: Path):
+def _save_summary_plot(per_scene, avg, score, out_path: Path):
     fig, axes = plt.subplots(3, 3, figsize=(18, 14), constrained_layout=True)
     flat = axes.flatten()
     for i in range(8):
@@ -212,38 +219,30 @@ def _save_summary_plot(per_scene, avg, score, qc_pass, out_path: Path):
             flat[i].axis("off")
     _plot_subplot(flat[8], avg, "全局平均", is_average=True)
 
-    if qc_pass and score is not None:
-        title, color = f"评估指标: {score:.4f}", "black"
-    else:
-        title, color = (f"评估失败: ISO=100 降噪Δ ≥ {QC_THRESHOLD}", "#c00")
-    fig.suptitle(title, fontsize=18, fontweight="bold", y=1.02, color=color)
+    title = (f"评估指标: {score:.4f}"
+             if score is not None else "评估指标: 无数据")
+    fig.suptitle(title, fontsize=18, fontweight="bold", y=1.02)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-def _print_iso_table(per_scene, avg, iso=HIGHLIGHT_ISO):
-    print(f"\n=== ISO={iso} EPE (单位: Pixel) ===")
-    header = f"{'场景':<10}{'原始':>10}{'降噪':>10}{'Δ(原-降)':>14}{'ISO=100 降噪Δ':>16}"
+def _print_summary(per_scene: list[dict], avg: dict, score: Optional[float]):
+    print(f"\n=== EPE vs ISO=100 无降噪 基准 (ISO 100..{MAX_ISO} 平均) ===")
+    header = f"{'场景':<10}{'无降噪':>10}{'降噪':>10}{'Δ(无降噪-降噪)':>18}"
     print(header); print("-" * len(header))
     for i, d in enumerate(per_scene, 1):
-        e = _epe_at(d, iso)
-        o = f"{e['orig']:.4f}" if e['orig'] is not None else "  -  "
-        x = f"{e['dn']:.4f}" if e['dn']   is not None else "  -  "
-        diff = (f"{e['orig'] - e['dn']:+.4f}"
-                if (e['orig'] is not None and e['dn'] is not None) else "   -   ")
-        c = d.get("iso100_cross_epe")
-        cs = f"{c:.4f}" if c is not None else "  -  "
-        print(f"场景 {i:<6}{o:>10}{x:>10}{diff:>14}{cs:>16}")
+        mo = d.get("mean_orig"); md = d.get("mean_dn")
+        o = f"{mo:.4f}" if mo is not None else "  -  "
+        x = f"{md:.4f}" if md is not None else "  -  "
+        diff = f"{mo - md:+.4f}" if (mo is not None and md is not None) else "   -   "
+        print(f"场景 {i:<6}{o:>10}{x:>10}{diff:>18}")
     print("-" * len(header))
-    e = _epe_at(avg, iso)
-    o = f"{e['orig']:.4f}" if e['orig'] is not None else "  -  "
-    x = f"{e['dn']:.4f}" if e['dn']   is not None else "  -  "
-    diff = (f"{e['orig'] - e['dn']:+.4f}"
-            if (e['orig'] is not None and e['dn'] is not None) else "   -   ")
-    c = avg.get("iso100_cross_epe")
-    cs = f"{c:.4f}" if c is not None else "  -  "
-    print(f"{'全局平均':<10}{o:>10}{x:>10}{diff:>14}{cs:>16}")
+    mo = avg.get("mean_orig"); md = avg.get("mean_dn")
+    o = f"{mo:.4f}" if mo is not None else "  -  "
+    x = f"{md:.4f}" if md is not None else "  -  "
+    diff = f"{mo - md:+.4f}" if (mo is not None and md is not None) else "   -   "
+    print(f"{'全局平均':<10}{o:>10}{x:>10}{diff:>18}")
 
 
 def evaluate(
@@ -252,8 +251,9 @@ def evaluate(
     *,
     quiet: bool = False,
 ) -> EvalResult:
-    """Aggregate disparity PNGs in ``depth_dir`` into an EvalResult and save
-    ``plot_dir/Summary_Depth_EPE_Final.png``."""
+    """Aggregate disparity PNGs in ``depth_dir`` into an :class:`EvalResult`
+    and save ``plot_dir/Summary_Depth_EPE_Final.png``.
+    """
     depth_dir = Path(depth_dir)
     plot_dir  = Path(plot_dir)
     if not depth_dir.exists():
@@ -273,32 +273,22 @@ def evaluate(
         if d:
             per_scene.append(d)
     avg = _global_average(per_scene)
-
-    if not quiet:
-        print(f"处理场景数: {len(per_scene)} | 最大ISO限制: {MAX_ISO}")
-        print("指标: EPE (Mean Absolute Error)")
-        _print_iso_table(per_scene, avg, HIGHLIGHT_ISO)
-
-    cross = avg.get("iso100_cross_epe")
-    qc_pass = cross is not None and cross < QC_THRESHOLD
-    score = _epe_at(avg, HIGHLIGHT_ISO)["dn"] if qc_pass else None
+    score = _score_from_per_scene(per_scene)
 
     plot_path = plot_dir / "Summary_Depth_EPE_Final.png"
-    _save_summary_plot(per_scene, avg, score, qc_pass, plot_path)
+    _save_summary_plot(per_scene, avg, score, plot_path)
 
     if not quiet:
+        print(f"处理场景数: {len(per_scene)} | 最大ISO: {MAX_ISO}")
+        print(f"基准: 每个场景的 (ISO={BASELINE_ISO}, denoise=0)")
+        _print_summary(per_scene, avg, score)
         print(f"\n[完成] 图表已保存: {plot_path}")
         print("\n" + "=" * 50); print("最终结论"); print("=" * 50)
-        if qc_pass:
-            print(f"通过 QC (ISO=100 降噪Δ 平均 = {cross:.4f} < {QC_THRESHOLD})")
-            if score is not None:
-                print(f"评估指标 = {score:.4f}")
+        if score is not None:
+            print(f"评估指标 = {score:.4f}")
         else:
-            cs = f"{cross:.4f}" if cross is not None else "N/A"
-            print(f"未通过 QC (ISO=100 降噪Δ 平均 = {cs} ≥ {QC_THRESHOLD})")
-            print("评估指标: 不输出")
+            print("评估指标: 无数据")
 
     return EvalResult(
-        qc_pass=qc_pass, score=score, iso100_delta=cross,
-        per_scene=per_scene, avg=avg, plot_path=str(plot_path),
+        score=score, per_scene=per_scene, avg=avg, plot_path=str(plot_path),
     )

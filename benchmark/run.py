@@ -3,21 +3,23 @@
 Three stages, all reachable from a single function call:
 
     1. prepare:  for every <scene>/<gain>/sensor[23]_raw.png,
-                 onnx-denoise -> ISP -> rectify -> output/isp_out/{2,3}/.
+                 onnx-denoise -> ISP -> rectify -> output/isp/{2,3}/.
                  The matching ``sensor[23]_isp.png`` files are rectified-only
                  (the "no-denoise" branch the EPE eval compares against).
     2. depth:    stereo network on the (cam2, cam3) pairs ->
                  output/depth/  (16-bit disparity * 100, used by EPE)
                  output/visual/ (side-by-side colour visualisations)
-    3. eval:     scenario / ISO aggregation, QC check, summary plot ->
-                 EvalResult (qc_pass, score, iso100_delta).
+    3. eval:     scenario / ISO aggregation -> EvalResult (score, per-scene).
+                 Score = mean denoised EPE across ISO 100..1600 vs each
+                 scene's ``(iso=100, denoise=0)`` baseline. Single number,
+                 no QC threshold.
 
 Usage:
     # As a function
     from benchmark.run import run_benchmark
     res = run_benchmark(onnx_path=".../model.onnx",
                         data_root="train_data/Data")
-    print(res.score, res.qc_pass)
+    print(res.score)
 
     # As a CLI
     python benchmark/run.py --onnx checkpoints/_benchmark.onnx
@@ -129,8 +131,8 @@ def stage_depth(prepared_root: Path, depth_root: Path, **kw) -> int:
     return run_depth(prepared_root / "2", prepared_root / "3", depth_root, **kw)
 
 
-def stage_eval(depth_root: Path, plot_dir: Path, *, quiet: bool = False) -> EvalResult:
-    return evaluate(depth_root / "depth", plot_dir, quiet=quiet)
+def stage_eval(disp_dir: Path, plot_dir: Path, *, quiet: bool = False) -> EvalResult:
+    return evaluate(disp_dir, plot_dir, quiet=quiet)
 
 
 # ---------------------------------------------------------------------------
@@ -172,15 +174,17 @@ def run_benchmark(
     onnx_path  = Path(onnx_path)
     data_root  = Path(data_root)
     output_dir = Path(output_dir)
-    prepared   = output_dir / "isp_out"
-    depth_out  = output_dir / "depth_out"
+    prepared   = output_dir / "isp"
 
     if not skip_prepare:
         stage_prepare(onnx_path, data_root, prepared,
                       num_workers=num_workers, providers=providers)
     if not skip_depth:
-        stage_depth(prepared, depth_out, device=device)
-    return stage_eval(depth_out, output_dir, quiet=quiet)
+        # ``stage_depth`` writes ``output_dir/depth/`` and
+        # ``output_dir/visual/`` — flat under the run's output root,
+        # alongside ``isp/`` and the final summary plot.
+        stage_depth(prepared, output_dir, device=device)
+    return stage_eval(output_dir / "depth", output_dir, quiet=quiet)
 
 
 def _cli():
@@ -203,9 +207,7 @@ def _cli():
         num_workers=args.num_workers, quiet=args.quiet,
         skip_prepare=args.skip_prepare, skip_depth=args.skip_depth,
     )
-    if res.qc_pass and res.score is not None:
-        return 0
-    return 2
+    return 0 if res.score is not None else 2
 
 
 if __name__ == "__main__":

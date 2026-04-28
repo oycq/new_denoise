@@ -173,8 +173,13 @@ def run_depth(
             f"img1_dir={img1_dir} ({len(imgs1)} files) and "
             f"img2_dir={img2_dir} ({len(imgs2)} files) are not balanced")
 
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
+    # Wipe just our two subtrees, not the whole ``out_dir`` — callers may
+    # legitimately point ``out_dir`` at a shared output root that already
+    # holds other artefacts (the ``isp/`` tree from stage 1, the summary
+    # plot from stage 3) which we have no business deleting.
+    for sub in ("depth", "visual"):
+        if (out_dir / sub).exists():
+            shutil.rmtree(out_dir / sub)
     (out_dir / "depth").mkdir(parents=True)
     (out_dir / "visual").mkdir(parents=True)
 

@@ -31,9 +31,9 @@ benchmark/
 ├── eval/                   # 4. EPE 聚合 + QC + 出图
 │   └── epe.py              #    evaluate(depth_dir, plot_dir) -> EvalResult
 └── output/                 # 中间产物 + 最终图 (run.py 写)
-    ├── isp_out/            #   denoise + ISP + rectify 后的 BGR PNG
-    ├── depth_out/depth/    #   uint16 视差*100
-    ├── depth_out/visual/   #   可视化深度图
+    ├── isp/{2,3}/          #   denoise + ISP + rectify 后的 BGR PNG
+    ├── depth/              #   uint16 视差*100
+    ├── visual/             #   可视化深度图
     └── Summary_Depth_EPE_Final.png
 ```
 
@@ -77,7 +77,7 @@ res = run_benchmark(
     data_root="train_data/Data",            # 默认就是这个
     output_dir="benchmark/output",          # 默认就是这个
 )
-print(res.qc_pass, res.score, res.iso100_delta)
+print(res.score)
 ```
 
 `EvalResult` 结构：
@@ -85,14 +85,35 @@ print(res.qc_pass, res.score, res.iso100_delta)
 ```python
 @dataclass
 class EvalResult:
-    qc_pass: bool                    # ISO=100 降噪Δ < 0.6
-    score: float | None              # ISO=1000 平均 EPE; QC 不过时为 None
-    iso100_delta: float | None       # ISO=100 跨条件 EPE
-    qc_threshold: float = 0.6
+    score: float | None              # 唯一指标 (见下), 越小越好
     per_scene: list[dict]            # 各场景 EPE 曲线原始数据
     avg: dict                        # 全局平均
     plot_path: str                   # Summary_Depth_EPE_Final.png 绝对路径
 ```
+
+## 指标定义 (单一基准, 单一数字)
+
+每个场景内, **唯一基准** 就是该场景的 `(ISO=100, denoise=0)` 视差图 ——
+也就是 "干净 ISO 不去噪" 那一张。该场景里其它每张视差图 (任意 ISO,
+任意 denoise=0/1) 都跟它算 EPE：
+
+```
+EPE(scene, iso, k) = mean | disp(scene, iso, k) - disp(scene, 100, 0) | / 100
+```
+
+**评估指标** = 把所有场景 × 所有 ISO ∈ [100, 1600] 的 `EPE(scene, iso, denoise=1)`
+全 pool 起来算一个均值, 一个浮点数。无 QC 阈值, 越小越好。
+
+无降噪曲线 (`denoise=0`) 仍然画在每个子图上做视觉对照, 但 **不进指标**。
+评估指标只看降噪那条曲线相对干净基准的距离。
+
+之前那一版 (按 denoise 分别取 ISO=100 自己的 baseline、只在 ISO=1000
+取一个点、加 0.6 的 QC 阈值) 已下线。理由是：
+1. 给 denoise=1 单独配一个 ISO=100 denoise=1 的 baseline 等于让降噪
+   方法 "自比", 没法揭露降噪在干净 ISO=100 上的扰动。
+2. 单点 (ISO=1000) 抗噪声差, 跨次能差 0.1 量级。
+3. QC 阈值是个二元 gate, 不利于做 sweep / 横向对比 (要不要把分数显
+   示出来变成临界判定)。统一用 "全 ISO 平均, 单基准" 后这些都消失。
 
 只想重跑 eval 不重新去噪 / 跑深度：
 
@@ -127,23 +148,24 @@ python benchmark/run.py --onnx ... --skip-prepare --skip-depth
 
 ## 验证
 
-跑了一次最优 ckpt：
+跑一次 3 分钟训练的 `l1tv_lam01_3min` ckpt:
 
 ```
-[depth] processed 140 pairs in 6.0s (42.7 ms/img, 23.42 img/s)
-处理场景数: 7 | 最大ISO限制: 1600
-=== ISO=1000 EPE (单位: Pixel) ===
-... 全局平均  0.5202   0.4187   +0.1015   0.3233
-通过 QC (ISO=100 降噪Δ 平均 = 0.3233 < 0.6)
-评估指标 = 0.4187
+处理场景数: 7 | 最大ISO: 1600
+基准: 每个场景的 (ISO=100, denoise=0)
+
+=== EPE vs ISO=100 无降噪 基准 (ISO 100..1600 平均) ===
+场景               无降噪        降噪      Δ(无降噪-降噪)
+------------------------------------------------
+场景 1         0.2550    0.3098      -0.0549
+场景 2         0.4791    0.6177      -0.1386
+... (略)
+全局平均          0.4162    0.5801      -0.1640
+
+评估指标 = 0.5801
 ```
 
-跟搬迁前用 `/root/ysstereo/run.sh` 跑这同一个 ONNX 拿到的 `0.4188`
-对得上（差 0.0001 是 ISP/AWB 在浮点路径上有顺序差，量级一致），
-说明这次搬迁没改动数学语义。
-
-整套 wall-clock 54s（旧的 ysstereo run.sh ~36s 但要 cd 来 cd 去开
-3 个 Python 进程），现在一次进程跑完。
+整套 wall-clock ~80s (prepare 60s, depth 9s, eval 1s)。
 
 ## 没搬 / 没动的
 
