@@ -351,7 +351,7 @@ class Trainer:
                     enabled=amp_enabled,
                     dtype=amp_dtype if amp_enabled else torch.float16,
                 ):
-                    den_g1 = model_compiled(g1)
+                    den_g1 = g1 - model_compiled(g1)
                     loss, _l1, _tv = _l1_plus_tv(den_g1, g2, cfg.tv_lambda)
 
                 opt.zero_grad(set_to_none=True)
