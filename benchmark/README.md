@@ -10,6 +10,14 @@
 benchmark 用的图直接读仓库里的 `train_data/Data/`（跟训练集是同一份），
 不再需要外部数据目录。
 
+> **2026-04-29 更新**：`denoise=0` 和 `denoise=1` 两条 EPE 曲线**改成了
+> 走同一条离线 ISP**（`raw → isp_process → rectify`）, 只差 `denoiser`
+> 是否调用一次。之前 `denoise=0` 用的是 vendor 预渲染的 `sensor*_isp.png`,
+> 跟 `denoise=1` 走 `isp_process` 不是一条路, ISP 差异会被算进 EPE 里把
+> 降噪贡献淹没。改完之后 **`denoiser=identity` 时两条曲线点对点严格相
+> 等**, 评估指标的 Δ 才真实反映"降噪本身"的贡献。详见下面 *ISP 对称性*
+> 一节。
+
 ## 目录布局
 
 ```
@@ -121,6 +129,48 @@ EPE(scene, iso, k) = mean | disp(scene, iso, k) - disp(scene, 100, 0) | / 100
 python benchmark/run.py --onnx ... --skip-prepare --skip-depth
 ```
 
+## ISP 对称性 (denoise=0 / denoise=1 同管线)
+
+`benchmark/run.py::_prepare_one` 现在两条路径**只差一个 `denoiser` 调用**:
+
+```
+denoise=0:  raw -> identity                 -> isp_process -> rectify -> output
+denoise=1:  raw -> denoiser(bayer_01)       -> isp_process -> rectify -> output
+```
+
+数据树里的 vendor `sensor*_isp.png` **不再参与评估**, `_prepare_one` 直接
+忽略掉。每帧 `sensor*_raw.png` 一次性产出 `_0.png` 和 `_1.png` 两张图。
+
+为什么这么改：之前 `denoise=0` 用 vendor 预渲染的 `sensor*_isp.png`,
+`denoise=1` 用我们的 `isp_process`。两条 ISP 在 demosaic 顺序、LSC、
+AWB/CCM、gamma 上都不一样, 同一份 raw 出来的 RGB 都不一样, depth 网络
+跑出来视差也就不同。结果 ISO=100 上即使 `denoiser=identity` 仍能看到
+**~0.5 像素的"恒定 EPE 偏置"**, 这个偏置跟降噪好坏无关, 但会被算到
+评估指标里, 把降噪贡献整个淹没——历史上看到 "降噪后 EPE 变差" 大半是
+这个伪信号导致的。
+
+**Sanity check**: 拿任一模型导出 `residual_scale=0` 的 ONNX 跑 benchmark
+(等价于 `denoiser=identity`):
+
+```
+全局平均  无降噪 0.7805   降噪 0.7805   Δ +0.0000
+```
+
+每场景每 ISO 的 Δ 都是 `±0.0000`, 评估指标 = 0.7805 = 这套离线 ISP
+本身在我们 depth 网络下的 "无降噪 baseline", 数字越小说明 raw 经过
+ISP 后越接近 `(scene, 100, 0)` 那张参考。
+
+实际跑法 (用 `bench_scale.py` 把 α 烘进 ONNX):
+
+```bash
+python bench_scale.py result/<run> 0.0 --name verify_alpha0
+# stdout 末尾应该看到 全局平均 Δ +0.0000
+```
+
+> 注意原本搬过来的 0.4-0.6 历史成绩 (见 `docs/how_to_run_benchmark.txt`
+> 第 6 节) 用的是 ysstereo 的旧 ISP, 跟当前评估不同管线, **不能直接横
+> 比**。重新跑一份新基线再开始评估。
+
 ## 与原 ysstereo 的对应关系 / 改动一览
 
 | 原文件 | 本仓库位置 | 关键改动 |
@@ -148,24 +198,50 @@ python benchmark/run.py --onnx ... --skip-prepare --skip-depth
 
 ## 验证
 
-跑一次 3 分钟训练的 `l1tv_lam01_3min` ckpt:
+跑一次 3 分钟训练的 `l1tv_lam01_3min` ckpt (新对称-ISP 评估):
 
 ```
 处理场景数: 7 | 最大ISO: 1600
 基准: 每个场景的 (ISO=100, denoise=0)
 
 === EPE vs ISO=100 无降噪 基准 (ISO 100..1600 平均) ===
-场景               无降噪        降噪      Δ(无降噪-降噪)
+场景               无降噪        降噪         Δ(无降噪-降噪)
 ------------------------------------------------
-场景 1         0.2550    0.3098      -0.0549
-场景 2         0.4791    0.6177      -0.1386
-... (略)
-全局平均          0.4162    0.5801      -0.1640
+场景 1         0.4418    0.2611           +0.1807
+场景 2         1.3028    0.5967           +0.7062
+场景 3         0.4885    0.4922           -0.0037
+场景 4         0.4072    0.2904           +0.1169
+场景 5         1.6828    0.5373           +1.1455
+场景 6         0.7187    0.3763           +0.3424
+场景 7         0.4223    0.4106           +0.0116
+------------------------------------------------
+全局平均          0.7806    0.4235           +0.3571
 
-评估指标 = 0.5801
+评估指标 = 0.4235
 ```
 
-整套 wall-clock ~80s (prepare 60s, depth 9s, eval 1s)。
+整套 wall-clock ~100s (prepare 75s, depth 12s, eval 1s; prepare 比之前
+慢一档因为每帧多走一次 ISP——`denoise=0` 现在也是从 raw 算的)。
+
+要点:
+- "无降噪" 列那 0.7806 是这套 ISP 的"绝对下限基线"——`denoiser=identity`
+  能拿的分。比之前用 vendor `*_isp.png` 时的 0.4162 高很多, **不是因
+  为变差了, 是因为之前那个 0.4162 是个不同 ISP 的分数**。
+- 想要分数有意义, 看 **Δ(无降噪-降噪)**: 正值就是降噪真有用; 负值就是
+  降噪伤了 depth (常见原因: TV 过强 / 噪声放大 / 模型过激进, 见
+  `docs/EXPERIMENTS_JOURNEY.md`)。
+- 单次跑分有 ~0.05 量级的方差 (depth 网络对 RGB 微扰敏感), 比方法 A 比
+  方法 B 时建议同样 ckpt 重复跑 2-3 次取均值, 别看单点。
+
+输出落盘 (`benchmark/output/` 里):
+- `isp/{2,3}/<scene>_<gain>_{0,1}.png` — 各 cam 校正后的 8-bit BGR PNG,
+  `_0` 是无降噪经我们 ISP, `_1` 是降噪经我们 ISP, 文件名打平的 scene
+  (下划线被去掉) 便于 EPE 模块按 `_<gain>_<denoise>` 解析。
+- `depth/<scene>_<gain>_{0,1}.png` — uint16 视差 × 100, EPE 直接读这层。
+- `visual/<scene>_<gain>_{0,1}.png` — 视差伪彩 + 输入并列的可视化图,
+  人肉看 depth 质量很好用。
+- `Summary_Depth_EPE_Final.png` — 7 场景子图 + 全局平均, 每张子图
+  画无降噪曲线 (蓝) 和降噪曲线 (红); 标题写最终评估指标。
 
 ## 没搬 / 没动的
 

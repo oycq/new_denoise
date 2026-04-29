@@ -81,19 +81,32 @@ def _parse_raw_path(p: Path) -> tuple[str, int, int, bool]:
 
 
 def _prepare_one(src: Path, denoiser, out_root: Path):
+    """Both the no-denoise (denoise=0) and denoise=1 outputs are generated
+    from the SAME raw input, going through the SAME offline ISP. Only
+    difference: denoise=1 applies ``denoiser`` to the bayer first.
+
+    This makes ``denoiser=identity`` a real null-op — denoise=0 and
+    denoise=1 outputs become byte-equal — instead of comparing two
+    different ISP pipelines (vendor pre-rendered ``sensor*_isp.png`` vs
+    our ``isp_process``). vendor ``*_isp.png`` files in the data tree
+    are ignored.
+    """
     scene, cam_id, gain, is_raw = _parse_raw_path(src)
-    if is_raw:
-        raw = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
-        bayer = raw.astype(np.float32) / 65535.0
-        bayer = denoiser(bayer)
-        rgb = isp_process(bayer, cam_id)
-        rgb = rectify(rgb, cam_id)
-    else:
-        rgb = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
-        rgb = rectify(rgb, cam_id)
+    if not is_raw:
+        return  # vendor ISPs no longer participate in the eval
+
+    raw = cv2.imread(str(src), cv2.IMREAD_UNCHANGED)
+    bayer_orig = raw.astype(np.float32) / 65535.0
+    bayer_dn   = denoiser(bayer_orig)
+
+    rgb_orig = rectify(isp_process(bayer_orig, cam_id), cam_id)
+    rgb_dn   = rectify(isp_process(bayer_dn,   cam_id), cam_id)
+
     scene_flat = scene.replace("_", "")
-    out_path = out_root / str(cam_id) / f"{scene_flat}_{gain}_{int(is_raw)}.png"
-    cv2.imwrite(str(out_path), rgb)
+    cv2.imwrite(
+        str(out_root / str(cam_id) / f"{scene_flat}_{gain}_0.png"), rgb_orig)
+    cv2.imwrite(
+        str(out_root / str(cam_id) / f"{scene_flat}_{gain}_1.png"), rgb_dn)
 
 
 def stage_prepare(
