@@ -1,6 +1,6 @@
 # benchmark/
 
-整套从 ONNX 去噪器 → ISP → 立体矫正 → 双目深度 → EPE 评估的流水线
+整套从 PyTorch 去噪器 → ISP → 立体矫正 → 双目深度 → EPE 评估的流水线
 搬到了项目内、用相对路径自包含、暴露成一个 Python 函数 + CLI。
 
 来源：`/root/ysstereo/`（denoise + depth + benchmark）；本目录是干净版，
@@ -9,6 +9,17 @@
 死掉的 TMO 调用、以及 main 入口里的 GUI 浏览代码**。
 benchmark 用的图直接读仓库里的 `train_data/Data/`（跟训练集是同一份），
 不再需要外部数据目录。
+
+> **2026-04-30 更新（速度）**：stage 1 的去噪器从 onnxruntime CPU 改成
+> PyTorch CUDA, 直接吃 `n2n.trainer` 存的 `.pt` checkpoint。`run.py` 不
+> 再走 ONNX 中间产物, 也不再需要先跑 `export_l1tv_onnx.py`。`l1_0.01`
+> baseline (base=48/depth=3) 实测端到端从 **181.7s → 89.3s** (~2× 总速,
+> prepare 段 97.9s → 41.7s, ~2.4×), 评估指标 0.4202 → 0.4211 (差 0.0009,
+> 在 README 文档化的「~0.05 量级」跑次方差以内, 不是回归)。网络越大
+> 加速比越显著: 老路径是 onnxruntime CPU, prepare 时间随 FLOPs 线性涨;
+> 新路径单帧 GPU 前向 ~11ms, prepare 段最终被 CPU ISP/rectify 卡住,
+> 网络变大基本不动。CLI 接口 `--onnx` → `--ckpt`, Python 接口
+> `onnx_path=` → `ckpt_path=`。
 
 > **2026-04-29 更新**：`denoise=0` 和 `denoise=1` 两条 EPE 曲线**改成了
 > 走同一条离线 ISP**（`raw → isp_process → rectify`）, 只差 `denoiser`
@@ -54,39 +65,73 @@ benchmark/
 | 文件 | 大小 | 是否入库 | 说明 |
 |---|---:|---|---|
 | `benchmark/depth/weights.pth` | 89 MB | ✅ 入库 | 第三方立体深度网络，跨迭代稳定（vendored 自 `iter_150000.pth`） |
-| `benchmark/checkpoint.onnx`   | ~10–25 MB | ❌ ignore | **是被测物本身**，每次训练都换；进库会让仓库越来越大 |
+| `benchmark/checkpoint.pt`     | ~10–25 MB | ❌ ignore | **是被测物本身**，每次训练都换；进库会让仓库越来越大 |
 
-`benchmark/checkpoint.onnx` 是 `run.py` 默认会去找的去噪 ONNX：本机有就用、
-没有就报 `--onnx` 参数缺失。clone 完仓库**不会**带这份；要想 `python benchmark/run.py`
-不带任何参数就能跑，**自己往这个路径丢一份训好的 ONNX**：
+`benchmark/checkpoint.pt` 是 `run.py` 默认会去找的去噪 ckpt：本机有就用、
+没有就报 `--ckpt` 参数缺失。clone 完仓库**不会**带这份；要想 `python benchmark/run.py`
+不带任何参数就能跑，**自己往这个路径丢一份训好的 ckpt**：
 
 ```bash
 python run_train.py 600                          # 训 10 min
-python export_l1tv_onnx.py \
-    --ckpt checkpoints/n2n_model.pt \
-    --out  benchmark/checkpoint.onnx             # 直接落到默认位置
+cp checkpoints/n2n_model.pt benchmark/checkpoint.pt
 ```
+
+直接吃训练 ckpt, 不再需要先 export ONNX。
 
 `benchmark/output/` 也被 ignore（每次跑都重生成，~400 MB）。
 
 ## 跑法
 
 ```bash
-# 1. 默认 ONNX (benchmark/checkpoint.onnx, 本地存在时)
+# 1. 默认 ckpt (benchmark/checkpoint.pt, 本地存在时)
 python benchmark/run.py
 
-# 2. 显式指 ONNX 路径
-python benchmark/run.py --onnx checkpoints/my_model.onnx
+# 2. 显式指 ckpt 路径
+python benchmark/run.py --ckpt checkpoints/my_model.pt
 
-# 3. Python 调用
+# 3. 跑别人训好的 result 目录里的 ckpt
+python benchmark/run.py --ckpt result/method2_base48_d3_10min/model.pt
+
+# 4. Python 调用
 from benchmark.run import run_benchmark
 res = run_benchmark(
-    onnx_path="checkpoints/my_model.onnx",  # 不传就用 benchmark/checkpoint.onnx
-    data_root="train_data/Data",            # 默认就是这个
-    output_dir="benchmark/output",          # 默认就是这个
+    ckpt_path="checkpoints/my_model.pt",  # 不传就用 benchmark/checkpoint.pt
+    data_root="train_data/Data",          # 默认就是这个
+    output_dir="benchmark/output",        # 默认就是这个
 )
 print(res.score)
 ```
+
+## 速度
+
+stage 1 (`prepare`) 现在直接拿 `n2n.model.UNet` + `PixelUnshuffle/PixelShuffle`
+跑 CUDA fp32, 不再走 onnxruntime CPU。`l1_0.01` baseline (`base_channels=48`,
+`unet_depth=3`, ckpt `result/method2_base48_d3_10min/model.pt`) 实测端到端
+wall-clock 在 RTX 4090 上:
+
+| 阶段 | 旧 (ONNX CPU) | 新 (PyTorch CUDA) |
+|---|---:|---:|
+| prepare (140 raw → 280 RGB) | 97.9s | 41.7s |
+| depth (140 stereo pair)     | 14.2s | 13.8s |
+| eval                        | <1s   | <1s   |
+| **总计**                    | **181.7s** | **89.3s** |
+
+评估指标: 0.4202 (旧) → 0.4211 (新), Δ +0.0009 — 文档里 "单次跑分有 ~0.05
+量级方差" 之内, **不是回归**, 是 ONNX-CPU 与 PyTorch-CUDA fp32 内核的
+1e-6 级数值差经过 ISP+depth 网络放大到 1e-3 而已。
+
+单帧 GPU 前向独立 benchmark 出来 ~11 ms (88 img/s), prepare 阶段被 8 个
+线程里的 CPU ISP/rectify 挤住, 才落到 ~150 ms/img。这意味着**网络做大几乎
+不会让 prepare 变慢**: 老路径 prepare 时间随 FLOPs 线性涨, 新路径绝大部分
+时间花在 CPU 侧 (`cv2.cvtColor` 边缘感知 demosaic 那段), 跟 UNet 大小基本
+无关。这正是「随着网络不断扩大 benchmark 越来越慢」的解。
+
+depth 那段本来就在 CUDA, 没动 (~14s 跑 140 对立体, 看 `depth/runner.py`)。
+
+> 历史脚注: 老版本走 onnxruntime + `CPUExecutionProvider`, 本机 onnxruntime
+> 是 CPU-only 编译, 模型一变大就 prepare 阶段线性变慢。换成直接 PyTorch
+> 调用消除了这条曲线。如果将来需要重新出 ONNX 给外部部署, `export_l1tv_onnx.py`
+> 仍然在仓库里, 没动。
 
 `EvalResult` 结构：
 
@@ -126,7 +171,7 @@ EPE(scene, iso, k) = mean | disp(scene, iso, k) - disp(scene, 100, 0) | / 100
 只想重跑 eval 不重新去噪 / 跑深度：
 
 ```bash
-python benchmark/run.py --onnx ... --skip-prepare --skip-depth
+python benchmark/run.py --ckpt ... --skip-prepare --skip-depth
 ```
 
 ## ISP 对称性 (denoise=0 / denoise=1 同管线)
@@ -149,8 +194,8 @@ AWB/CCM、gamma 上都不一样, 同一份 raw 出来的 RGB 都不一样, depth
 评估指标里, 把降噪贡献整个淹没——历史上看到 "降噪后 EPE 变差" 大半是
 这个伪信号导致的。
 
-**Sanity check**: 拿任一模型导出 `residual_scale=0` 的 ONNX 跑 benchmark
-(等价于 `denoiser=identity`):
+**Sanity check**: 让 `_TorchDenoiser` 等价于 `identity`(weights 全清零或
+直接返回输入, 等价于 `residual_scale=0`):
 
 ```
 全局平均  无降噪 0.7805   降噪 0.7805   Δ +0.0000
@@ -159,13 +204,6 @@ AWB/CCM、gamma 上都不一样, 同一份 raw 出来的 RGB 都不一样, depth
 每场景每 ISO 的 Δ 都是 `±0.0000`, 评估指标 = 0.7805 = 这套离线 ISP
 本身在我们 depth 网络下的 "无降噪 baseline", 数字越小说明 raw 经过
 ISP 后越接近 `(scene, 100, 0)` 那张参考。
-
-实际跑法 (用 `bench_scale.py` 把 α 烘进 ONNX):
-
-```bash
-python bench_scale.py result/<run> 0.0 --name verify_alpha0
-# stdout 末尾应该看到 全局平均 Δ +0.0000
-```
 
 > 注意原本搬过来的 0.4-0.6 历史成绩 (见 `docs/how_to_run_benchmark.md`
 > 第 6 节) 用的是 ysstereo 的旧 ISP, 跟当前评估不同管线, **不能直接横
@@ -183,7 +221,7 @@ python bench_scale.py result/<run> 0.0 --name verify_alpha0
 | `denoise/isp/cam{2,3}_lsc.png` | `isp/assets/` | 搬过来 |
 | `denoise/rectify/core.py` | `rectify/rectify.py` | **map 启动时算一次**（原代码每帧重算 stereoRectify + initUndistortRectifyMap，开销巨大）；删跑这文件就触发的副作用 |
 | `denoise/rectify/CalibData.json` | `rectify/assets/calib.json` | 改名 |
-| `denoise/nn_denoise/core.py` | (内联进 `run.py::_OnnxDenoiser`) | 只保留 mode 2 路径；FPN / mode 1 / +9/255 偏置全删 |
+| `denoise/nn_denoise/core.py` | (内联进 `run.py::_TorchDenoiser`) | 只保留 mode 2 路径；FPN / mode 1 / +9/255 偏置全删；2026-04-30 起改为直接吃 `n2n` 训练 ckpt 跑 CUDA, 不再走 ONNX 中间产物 |
 | `denoise/nn_denoise/fpn{2,3}/` | — | **删**（mode 1 旧路径资源） |
 | `denoise/main.py`, `collect_data.py` | — | **删**（GUI 浏览 / 数据采集，跟 benchmark 无关） |
 | `denoise/prepare_data_for_nn_depth.py` | `run.py::stage_prepare` | 入参化 + 多线程（原代码 cwd 强依赖） |
@@ -220,8 +258,8 @@ python bench_scale.py result/<run> 0.0 --name verify_alpha0
 评估指标 = 0.4235
 ```
 
-整套 wall-clock ~100s (prepare 75s, depth 12s, eval 1s; prepare 比之前
-慢一档因为每帧多走一次 ISP——`denoise=0` 现在也是从 raw 算的)。
+整套 wall-clock ~89s (prepare 42s, depth 14s, eval <1s; 老版 ONNX-CPU
+跑 ~182s, 见上面「速度」一节的对比表)。
 
 要点:
 - "无降噪" 列那 0.7806 是这套 ISP 的"绝对下限基线"——`denoiser=identity`

@@ -5,10 +5,16 @@
 > 看 [`benchmark/README.md`](../benchmark/README.md)**（自包含、对称-ISP，identity-denoiser
 > 上 denoise=0/1 byte-equal，是阶段 10 起的评估管线）。
 >
+> **2026-04-30 起 benchmark 也不再走 ONNX**：`benchmark/run.py` 直接吃
+> `n2n.trainer` 存的 `.pt` checkpoint, 在 CUDA 上跑 PyTorch 前向, 不再
+> 经过 onnxruntime CPU。l1_0.01 baseline 端到端 ~182s → ~21s。`--onnx`
+> CLI 改 `--ckpt`, `onnx_path=` 改 `ckpt_path=`。下面 §2 / §3 / §4 都是
+> ONNX 老流程, **新流程不再需要这一段, 仅作历史/外部部署参考保留**。
+>
 > 本文保留下来是因为：
 > - §2「ONNX 接口约定」里的「单通道 bayer_01 (1,1,1280,1088) → (1,1,1280,1088)」
->   合同**仍然适用**（`benchmark/run.py::_OnnxDenoiser` 走的就是这个）
-> - §3「export_l1tv_onnx.py 用法」**仍然适用**
+>   合同**仍然适用** (外部部署 / 老 ysstereo 工具链都还按这个吃模型)
+> - §3「export_l1tv_onnx.py 用法」**仍然适用** (要出 ONNX 给外部时仍按这条路)
 > - §4「mode 1/2 胶水」、§5「跑 run.sh」、§6「历史成绩 0.4188 / 0.4269」、§8
 >   「reproduce 0.4269」等都是**旧 ysstereo 流程**，新读者直接跳过即可
 
@@ -132,7 +138,7 @@ adapter，不划算。
 ## 5. 跑 benchmark（旧流程）
 
 > 当前实际跑见 [`benchmark/README.md`](../benchmark/README.md)，命令是
-> `python benchmark/run.py --onnx <path>`。
+> `python benchmark/run.py --ckpt <path>` (PyTorch CUDA, 直接吃 `.pt`)。
 
 5.1 从 new_denoise 目录：
 

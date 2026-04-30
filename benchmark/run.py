@@ -1,9 +1,9 @@
-"""End-to-end benchmark: ONNX denoiser -> ISP -> rectify -> stereo depth -> EPE.
+"""End-to-end benchmark: PyTorch denoiser -> ISP -> rectify -> stereo depth -> EPE.
 
 Three stages, all reachable from a single function call:
 
     1. prepare:  for every <scene>/<gain>/sensor[23]_raw.png,
-                 onnx-denoise -> ISP -> rectify -> output/isp/{2,3}/.
+                 torch-denoise -> ISP -> rectify -> output/isp/{2,3}/.
                  The matching ``sensor[23]_isp.png`` files are rectified-only
                  (the "no-denoise" branch the EPE eval compares against).
     2. depth:    stereo network on the (cam2, cam3) pairs ->
@@ -14,15 +14,21 @@ Three stages, all reachable from a single function call:
                  scene's ``(iso=100, denoise=0)`` baseline. Single number,
                  no QC threshold.
 
+Stage 1 used to drive the model through onnxruntime on CPU, which scales
+linearly with model size and was the dominant cost as the network grew.
+It now loads the training checkpoint (``.pt``) directly and runs the
+UNet on CUDA — same numerical contract (fp32, single-channel bayer_01
+in / out), an order of magnitude faster.
+
 Usage:
     # As a function
     from benchmark.run import run_benchmark
-    res = run_benchmark(onnx_path=".../model.onnx",
+    res = run_benchmark(ckpt_path=".../model.pt",
                         data_root="train_data/Data")
     print(res.score)
 
     # As a CLI
-    python benchmark/run.py --onnx checkpoints/_benchmark.onnx
+    python benchmark/run.py --ckpt checkpoints/n2n_model.pt
 """
 from __future__ import annotations
 
@@ -31,41 +37,79 @@ import glob
 import os
 import shutil
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
+import torch.nn as nn
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from isp import isp_process            # noqa: E402
 from rectify import rectify            # noqa: E402
 from eval import evaluate, EvalResult  # noqa: E402
 
+from n2n.model import UNet              # noqa: E402
+
 
 # ---------------------------------------------------------------------------
-# Stage 1: ONNX denoise + ISP + rectify
+# Stage 1: PyTorch denoise + ISP + rectify
 # ---------------------------------------------------------------------------
-class _OnnxDenoiser:
-    """Single-channel bayer_01 in / out — matches the contract of every
-    ONNX exported by ``export_l1tv_onnx.py`` (mode 2, no FPN, no offset)."""
+class _TorchDenoiser:
+    """Single-channel bayer_01 in / out — runs the residual UNet on CUDA.
 
-    def __init__(self, onnx_path: Path, providers=None):
-        import onnxruntime as ort
-        prov = providers or ["CPUExecutionProvider"]
-        self.sess = ort.InferenceSession(str(onnx_path), providers=prov)
-        self.in_name  = self.sess.get_inputs()[0].name
-        self.out_name = self.sess.get_outputs()[0].name
+    The denoiser is the (PixelUnshuffle -> UNet -> subtract residual ->
+    PixelShuffle) wrapper that ``export_l1tv_onnx.py`` used to bake into
+    the ONNX. It is rebuilt directly from a training checkpoint, so the
+    benchmark no longer depends on an ONNX export step.
 
+    The thread-pool in :func:`stage_prepare` calls this from up to
+    ``num_workers`` threads at once; the CUDA kernel calls are protected
+    by a lock so the GPU sees one inference at a time while the per-frame
+    PNG decode / ISP / rectify / encode work parallelises across threads.
+    """
+
+    def __init__(self, ckpt_path: Path, device: str | torch.device | None = None):
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+
+        ckpt = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+        cfg = ckpt.get("config", {}) or {}
+        base = int(cfg.get("base_channels", 48))
+        depth = int(cfg.get("unet_depth", 3))
+
+        unet = UNet(in_ch=4, out_ch=4, base=base, depth=depth)
+        sd = ckpt["model"] if "model" in ckpt else ckpt
+        if any(k.startswith("_orig_mod.") for k in sd):
+            sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
+        unet.load_state_dict(sd)
+
+        self.pack = nn.PixelUnshuffle(2).to(self.device)
+        self.unpack = nn.PixelShuffle(2).to(self.device)
+        self.unet = unet.to(self.device).eval()
+        self._lock = threading.Lock()
+
+    @torch.inference_mode()
     def __call__(self, bayer_01: np.ndarray) -> np.ndarray:
-        x = bayer_01[None, None].astype(np.float32, copy=False)
-        y = self.sess.run([self.out_name], {self.in_name: x})[0]
-        return np.clip(np.squeeze(y, axis=(0, 1)).astype(np.float32), 0, 1)
+        x = torch.from_numpy(np.ascontiguousarray(bayer_01)).to(
+            self.device, non_blocking=True
+        )[None, None]
+        with self._lock:
+            packed = self.pack(x)
+            residual = self.unet(packed)
+            den_packed = packed - residual
+            y = self.unpack(den_packed)
+        return y[0, 0].clamp_(0, 1).float().cpu().numpy()
 
 
 def _parse_raw_path(p: Path) -> tuple[str, int, int, bool]:
@@ -110,10 +154,10 @@ def _prepare_one(src: Path, denoiser, out_root: Path):
 
 
 def stage_prepare(
-    onnx_path: Path, data_root: Path, out_root: Path, *,
-    num_workers: int = 8, providers=None,
+    ckpt_path: Path, data_root: Path, out_root: Path, *,
+    num_workers: int = 8, device: str | torch.device | None = None,
 ) -> int:
-    """Stage 1: drive the ONNX denoiser over the full Data tree, render to
+    """Stage 1: drive the PyTorch denoiser over the full Data tree, render to
     rectified BGR, and write to ``out_root/{2,3}/<scene>_<gain>_<denoised>.png``.
     """
     if out_root.exists():
@@ -125,14 +169,14 @@ def stage_prepare(
     if not raws:
         raise RuntimeError(f"no input PNGs under {data_root}")
 
-    denoiser = _OnnxDenoiser(onnx_path, providers=providers)
+    denoiser = _TorchDenoiser(ckpt_path, device=device)
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=num_workers) as ex:
         list(ex.map(lambda p: _prepare_one(p, denoiser, out_root), raws))
     dt = time.time() - t0
     print(f"[prepare] {len(raws)} files in {dt:.1f}s "
-          f"({dt / len(raws) * 1000:.1f} ms/img)")
+          f"({dt / len(raws) * 1000:.1f} ms/img) on {denoiser.device}")
     return len(raws)
 
 
@@ -153,18 +197,17 @@ def stage_eval(disp_dir: Path, plot_dir: Path, *, quiet: bool = False) -> EvalRe
 # ---------------------------------------------------------------------------
 DEFAULT_DATA_ROOT = ROOT / "train_data" / "Data"
 DEFAULT_OUTPUT    = HERE / "output"
-DEFAULT_ONNX      = HERE / "checkpoint.onnx"   # local-only, gitignored
+DEFAULT_CKPT      = HERE / "checkpoint.pt"     # local-only, gitignored
 
 
 def run_benchmark(
-    onnx_path: str | Path,
+    ckpt_path: str | Path,
     data_root: str | Path = DEFAULT_DATA_ROOT,
     output_dir: str | Path = DEFAULT_OUTPUT,
     *,
     skip_prepare: bool = False,
     skip_depth: bool = False,
     num_workers: int = 8,
-    providers=None,
     device: str = "cuda:0",
     quiet: bool = False,
 ) -> EvalResult:
@@ -172,8 +215,11 @@ def run_benchmark(
 
     Parameters
     ----------
-    onnx_path
-        Path to the (1,1,H,W)->(1,1,H,W) bayer_01 denoiser ONNX (mode 2).
+    ckpt_path
+        Path to a training checkpoint produced by :mod:`n2n.trainer`
+        (``.pt`` containing ``{"model": state_dict, "config": {...}}``).
+        The denoiser is rebuilt as ``PixelUnshuffle -> UNet -> residual
+        subtract -> PixelShuffle`` and run on ``device`` (CUDA by default).
     data_root
         Root with ``<scene>/<gain>/sensor[23]_{raw,isp}.png`` (defaults to
         ``train_data/Data`` next to the repo root).
@@ -183,15 +229,18 @@ def run_benchmark(
     skip_prepare / skip_depth
         Reuse cached intermediates from a previous run (handy when only the
         eval changed).
+    device
+        CUDA / CPU device for *both* the denoiser (stage 1) and the stereo
+        depth network (stage 2).
     """
-    onnx_path  = Path(onnx_path)
+    ckpt_path  = Path(ckpt_path)
     data_root  = Path(data_root)
     output_dir = Path(output_dir)
     prepared   = output_dir / "isp"
 
     if not skip_prepare:
-        stage_prepare(onnx_path, data_root, prepared,
-                      num_workers=num_workers, providers=providers)
+        stage_prepare(ckpt_path, data_root, prepared,
+                      num_workers=num_workers, device=device)
     if not skip_depth:
         # ``stage_depth`` writes ``output_dir/depth/`` and
         # ``output_dir/visual/`` — flat under the run's output root,
@@ -202,10 +251,10 @@ def run_benchmark(
 
 def _cli():
     p = argparse.ArgumentParser(description="End-to-end ysstereo benchmark.")
-    p.add_argument("--onnx", default=str(DEFAULT_ONNX),
-                   help=f"denoiser ONNX (mode 2). Default: {DEFAULT_ONNX} "
-                        "(gitignored — drop your trained model here for "
-                        "no-args invocation).")
+    p.add_argument("--ckpt", default=str(DEFAULT_CKPT),
+                   help=f"denoiser training checkpoint (.pt). Default: "
+                        f"{DEFAULT_CKPT} (gitignored — drop your trained "
+                        "model here for no-args invocation).")
     p.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     p.add_argument("--output-dir", default=str(DEFAULT_OUTPUT))
     p.add_argument("--device", default="cuda:0")
@@ -215,7 +264,7 @@ def _cli():
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
     res = run_benchmark(
-        onnx_path=args.onnx, data_root=args.data_root,
+        ckpt_path=args.ckpt, data_root=args.data_root,
         output_dir=args.output_dir, device=args.device,
         num_workers=args.num_workers, quiet=args.quiet,
         skip_prepare=args.skip_prepare, skip_depth=args.skip_depth,
