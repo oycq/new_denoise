@@ -1,0 +1,359 @@
+# how_to_compare · 怎么写一份"两个版本/两种方法的去噪对比报告"
+
+## 适用场景
+
+两套训练配置（不同 loss、不同 commit、不同架构……）需要在同一份数据上
+跑同样长的 wall-clock，然后用一份网页报告把视觉差异摆出来。本仓库
+2026-04-27 那次 "paper N2N (L2 + γ·L_reg) vs L1+0.03·TV" 的对比就是按这个
+流程做的，最终产物是 `result/compare.html`，本文记录复刻它需要的全部步骤。
+
+> 本文重点是 **「两条 commit / 配方对比的工程套路」**——切 commit、双 ckpt
+> 同时加载、ROI 切片、HTML 拼图——这部分在阶段 10 的多模型 ensemble
+> 工作里仍然用得上。
+
+### 状态更新（main / legacy 的角色互换了）
+
+本文成文时主干是 paper N2N，而 L1+TV 在旧 commit `bab9f3b` 里。
+之后主干切回 **L1 + 0.01·TV**（见 [`EXPERIMENTS_JOURNEY.md`](EXPERIMENTS_JOURNEY.md)
+阶段 8 + 附录 A 的 commit 演化简表），paper N2N 反而成了"老 commit"。
+下文里凡是写 "切 bab9f3b 的 n2n/" 的地方，跑 paper N2N 时改成
+"切 fd46c6d / 0536c63 的 n2n/"；跑 L1+TV 时直接用主干即可（不需要再
+git checkout）。整体流程没变。
+
+## 1. 整体流程（5 步）
+
+0. 准备 GPU/环境（一次性，见末尾「已知坑」章节）
+1. 跑训练 A（10 min），得到 `ckpt_A`
+2. 跑训练 B（10 min），得到 `ckpt_B`
+   - 如果 B 来自旧 commit 且 `model.py` 已被改过，要先把那个 commit 的
+     `n2n/model.py` 抓一份副本到 `/tmp/legacy_model.py`，否则后面没法加载旧 ckpt。
+3. 写一个 `gen_compare.py`：
+   - 加载 A、B 两个 ckpt（用各自匹配的 `UNet` 类）
+   - 对挑出来的几张 raw（典型：每个 scene 的最高 ISO）做推理
+   - 切 4 联横排（noisy / A / B / vendor ISP）
+   - 切若干固定 ROI 做 2× 放大对比
+   - 拼 HTML
+4. 浏览器打开 `result/compare.html` 看
+
+## 2. 训练脚本怎么写
+
+不要去改 `trainer.py`，写一份 *很短* 的入口脚本调用现成的 `Trainer`。
+本仓库每次跑都新建两个一次性脚本（放 `/tmp/`，不污染仓库）：
+
+```
+/tmp/train_paper.py   ── 跑 main 当前的 paper N2N
+/tmp/train_legacy.py  ── 跑 bab9f3b 老版本的 L1+0.03·TV
+```
+
+骨架（约 30 行就够）：
+
+```python
+from dataclasses import replace
+from n2n.trainer import StepInfo, Trainer, TrainConfig
+
+cfg = replace(
+    TrainConfig(),
+    train_seconds=600.0,                 # 10 min
+    intermediate_save_seconds=(),        # 关掉中间快照，省磁盘
+    ckpt_path="checkpoints/<name>.pt",
+    # 老版本还要再加：
+    # loss_name="l1_plus_tv",
+    # loss_kwargs={"lam": 0.03},
+)
+
+last = {"step": 0, "epoch": 0}
+def _on_step(s: StepInfo) -> None:
+    last["step"], last["epoch"] = s.step, s.epoch
+    if s.epoch % 20 == 0:                # 每 20 epoch 打一行
+        print(f"ep={s.epoch} step={s.step} t={s.elapsed:.0f}s "
+              f"sps={s.steps_per_sec:.1f} loss={s.loss:.4f}", flush=True)
+
+Trainer(cfg, on_step=_on_step).run()
+print(f"DONE  steps={last['step']}  epochs={last['epoch']}")
+```
+
+跑训练时务必：
+
+- 用 `nohup ... > /tmp/train_<name>.log 2>&1 &` 后台跑，再 poll 日志，
+  避免 SSH 断线 / 终端超时把训练打断
+- 设 `PYTHONPATH=/home/bobiou/new_denoise`（脚本在 `/tmp` 下要这样找 n2n）
+- 设 `LD_LIBRARY_PATH=$HOME/.local/lib/python3.10/site-packages/nvidia/nccl/lib`
+  （否则 torch 拉系统老 nccl 报 `ncclCommRegister` 找不到，详见末尾）
+- 训练日志最后一行 `DONE  steps=...  epochs=...  avg_sps=...` 给 HTML 解析用
+
+参考时长（RTX 4090，patch=256, batch=6, depth=3, bf16, torch.compile=on）：
+
+| 配方 | 稳态 sps |
+|------|---------:|
+| paper N2N（每 step 2 次 forward） | ~163 |
+| L1 + TV（每 step 1 次 forward） | ~285 |
+
+## 3. 跨 commit 时怎么处理 model 架构差异
+
+如果两次训练分属不同 commit，且 `n2n/model.py` 在两个 commit 之间改过
+（比如本仓库从 `bab9f3b` 到 main 把 `max_pool` 换成 `BlurDown`、把
+`ConvTranspose` 换成 `PixelShuffle`、把残差头换成非残差头），那两份 ckpt
+的 `state_dict` key 会对不上，直接用 main 的 `UNet` 去 `load_state_dict`
+会 missing/unexpected 一堆 key。
+
+正确做法（本次实际用的）：
+
+### 3.1 在新 commit 还没切走之前，把旧 commit 的 model.py 抓一份副本
+
+```bash
+git show bab9f3b:n2n/model.py > /tmp/legacy_model.py
+```
+
+### 3.2 训练旧版本时，git checkout 旧 n2n/ 子树（不动其它文件）
+
+```bash
+git checkout bab9f3b -- n2n/
+rm -rf n2n/__pycache__   # 防止旧 .pyc 误用新 .py 时间戳
+```
+
+训练完之后切回 main：
+
+```bash
+# 旧 commit 引入的 main 没有的文件需要先 unstage 再删
+git restore --staged n2n/losses.py n2n/losses_perceptual.py n2n/robust_trainer.py
+rm -f n2n/losses.py n2n/losses_perceptual.py n2n/robust_trainer.py
+git checkout -- n2n/
+rm -rf n2n/__pycache__
+```
+
+### 3.3 推理 / 生成 HTML 时，运行的是新 commit 的代码（main），但要能加载旧 ckpt
+
+在 `gen_compare.py` 里用 `importlib` 动态加载 `/tmp/legacy_model.py`
+的 `UNet` 类：
+
+```python
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    "legacy_model", "/tmp/legacy_model.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+LegacyUNet = mod.UNet
+```
+
+然后两个 ckpt 各自用各自的 `UNet` 类构造 + `load_state_dict`。
+
+### 3.4 load_state_dict 前记得 strip torch.compile 的 `_orig_mod.` 前缀
+
+```python
+sd = ckpt["model"]
+if any(k.startswith("_orig_mod.") for k in sd):
+    sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
+model.load_state_dict(sd, strict=False)
+```
+
+做对了的话日志里 `missing=0 unexpected=0`。
+
+## 4. 推理 / ROI / 拼图细节
+
+### 4.1 数据选取
+
+每个 scene 选 1 张高 ISO 帧做横向对比。本仓库 7 个 scene × ISO 16 子目录 ×
+sensor2 是定死的"代表帧"。这样 HTML 控制在 7 个 scene-block 量级，不会过长。
+
+### 4.2 推理直接用 `n2n.infer.denoise_full_raw`
+
+它接受 model 实例做参数，两个 ckpt 都能复用同一个推理函数：
+
+```python
+den_A = denoise_full_raw(paper_model, raw, tile=512, overlap=32)
+den_B = denoise_full_raw(l1tv_model,  raw, tile=512, overlap=32)
+```
+
+### 4.3 WB 增益要在两边渲染之间共享
+
+否则颜色看起来不一样很容易误判：
+
+```python
+gains = gray_world_gains(raw_to_linear_bgr(den_A))
+noisy_disp = raw_to_display(raw, wb_gains=gains)
+A_disp     = raw_to_display(den_A, wb_gains=gains)
+B_disp     = raw_to_display(den_B, wb_gains=gains)
+```
+
+### 4.4 ROI 切 5 个固定位置
+
+`TL/TR/BL/BR/C`，320×320 像素，2× 最近邻放大：
+
+- 固定位置便于跨场景对比
+- 320 大约能覆盖一个有意义的局部（树枝、瓦片、墙面）
+- 2× nearest 放大让噪声颗粒看得清，**不要**用 `INTER_LINEAR` / `CUBIC`
+
+### 4.5 在每个 panel 顶部画一条黑色横条 + 白色文字标签
+
+`noisy / paper / l1+tv / vendor`，ImageJ stack 闪烁对比时一眼看出来当前是哪张。
+本仓库的 `_label()` 用 `cv2.rectangle + cv2.putText` 实现。
+
+### 4.6 cv2.putText 的 ASCII 限制
+
+`cv2.putText` 的字体（`FONT_HERSHEY_SIMPLEX` 等）只支持 ASCII。
+如果 method label 含 unicode（中点 "·"、箭头 "→"、希腊字母 γ λ 这种），
+cv2 会把它渲染成 "?"。HTML 没问题——cv2 只影响 banner。
+
+修法：在 `_label` 里加一张 unicode→ASCII 转写表，cv2 用转写后的字符串，
+HTML / figcaption 文字仍用原来的 unicode。
+
+```python
+_CV_TRANS = {ord(k): v for k, v in {
+    "\u00b7": ".",     # middle dot ·
+    "\u2192": "->",    # right arrow →
+    "\u03b3": "g",     # gamma γ
+    "\u03bb": "lam",   # lambda λ
+}.items()}
+
+def _label(img, text, *, color=(255,255,255), bg=(0,0,0)):
+    img = img.copy()
+    cv2.rectangle(img, (0,0), (img.shape[1], 32), bg, thickness=-1)
+    safe = (text.translate(_CV_TRANS)
+                .encode("ascii", "replace")
+                .decode("ascii"))
+    cv2.putText(img, safe, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, color, 1, cv2.LINE_AA)
+    return img
+```
+
+这样 banner 上是 `L1+0.01.TV`（ASCII 句点），HTML caption 仍是
+`L1+0.01·TV`（unicode 中点）。两边都不丢失语义，也都不乱码。
+
+> 踩过的坑：直接 print 没问题、HTML 渲染没问题，但 cv2 banner 是
+> `L1+0.01??TV`。第一次看到这种乱码会怀疑文件编码、shell locale、浏览器字体——
+> 其实只是 cv2 的字体表。
+
+## 5. HTML 模板风格要素（参考老 docs/REPORT.html 的视觉语言）
+
+老报告的 CSS 主色：
+
+- 主蓝 `#1f6feb`（h1 下边线 / h2 文字 / 链接）
+- 推荐绿 `#2da44e`（pill / 推荐 banner 渐变）
+- 警告黄 `#bf8700`
+- 灰底 `#fafafa`（页面背景，不要纯白，看一长页眼睛舒服）
+- 表格头淡蓝 `#f0f4f9`
+- 数字列 `.num { text-align: right; font-variant-numeric: tabular-nums }`
+
+布局约定：
+
+- `max-width: 1200~1400px`，居中，两侧 padding 24px
+- `<h1>` 下面紧跟一个 `<div class="nav">` 锚点导航
+- 每个对比 case 一个 `.scene-block` 卡片：白底、灰边框 1px、圆角 6px、
+  内边距 14~16px、淡阴影 `box-shadow: 0 1px 3px rgba(0,0,0,0.04)`
+- 卡片内：先全图 4 联，再 ROI 位置示意图，再 5 张 ROI 横条
+- 图都用 `<figure><img><figcaption>` 包裹，img 设 `image-rendering: pixelated`
+  （方便看噪声颗粒）
+
+行高亮（指标表里用过的）：
+
+```css
+tr.winner td { background: #d8f5d8 }    /* 推荐 */
+tr.runner td { background: #fff4d8 }    /* 备选 */
+tr.bad    td { background: #f8e0e0 }    /* 不推荐 */
+```
+
+页脚一定要有"公平性说明"章节，把对比 setup 里的非单变量因素列清楚：
+比如本次对比里两套架构都不一样（残差 vs 非残差、max_pool vs BlurDown），
+差异里既有 loss 的功劳也有架构的功劳；不能说成是 loss 消融。
+
+## 6. 输出目录结构
+
+```
+result/
+  compare.html                                # 主报告
+  compare_manifest.json                       # 解析后的 stats + 文件清单（debug 用）
+  scenes/
+    <scene_name>/
+      sensor2_full.jpg                        # 4 联全图
+      sensor2_roi_map.jpg                     # 标 5 个黄框的 ROI 位置示意
+      sensor2_roi_TL.png  ...  sensor2_roi_C.png
+```
+
+为什么 full 用 jpg、ROI 用 png：
+
+- full 图很大（4×1088×1280），jpg q=88 大约 1 MB；视觉信息看 ROI 就够了
+- ROI 是放大后的硬边噪声，要 png 无损，否则 jpg 块伪影会跟模型噪声搞混
+
+`result/` 在 `.gitignore` 里，不会进 git。报告产物本身不入库，源脚本入库即可。
+
+## 7. 怎么 reproduce 这次的对比
+
+```bash
+# 0. 一次性环境
+pip install --user 'triton==3.1.0'                 # 与 torch 2.5.x 配套
+export LD_LIBRARY_PATH=$HOME/.local/lib/python3.10/site-packages/nvidia/nccl/lib:$LD_LIBRARY_PATH
+
+# 1. 跑 paper N2N（main 当前代码）
+PYTHONPATH=$PWD nohup python -u /tmp/train_paper.py > /tmp/train_paper.log 2>&1 &
+# 等 ~10 min ...
+
+# 2. 跑 L1+0.03·TV（切到 bab9f3b 的 n2n/）
+git show bab9f3b:n2n/model.py > /tmp/legacy_model.py
+git checkout bab9f3b -- n2n/
+rm -rf n2n/__pycache__
+PYTHONPATH=$PWD nohup python -u /tmp/train_legacy.py > /tmp/train_legacy.log 2>&1 &
+# 等 ~10 min ...
+
+# 3. 切回 main，清理工作树
+git restore --staged n2n/losses.py n2n/losses_perceptual.py n2n/robust_trainer.py
+rm -f n2n/losses.py n2n/losses_perceptual.py n2n/robust_trainer.py
+git checkout -- n2n/
+rm -rf n2n/__pycache__
+
+# 4. 跑推理 + 生成 HTML
+PYTHONPATH=$PWD python -u /tmp/gen_compare.py
+
+# 5. 浏览器打开
+xdg-open result/compare.html
+```
+
+## 8. 已知坑
+
+- **torch 2.5.1 + triton 3.6.0**：不兼容，inductor 报
+  `cannot import name 'triton_key' from 'triton.compiler.compiler'`。
+  要降到 `triton==3.1.0`。降了之后 `torch.compile(reduce-overhead)` 才能用，
+  paper N2N 从 91 sps → 163 sps（+80%），L1+TV 从 ~150 sps → ~285 sps。
+
+- **系统 libnccl 太老**（Ubuntu 22.04 默认装的是 2.17.1，缺 `ncclCommRegister`）：
+  在 `LD_LIBRARY_PATH` 里把 pip 装的 `nvidia/nccl/lib` 顶到系统 nccl 前面就行，
+  不需要卸载系统 `libnccl2`。
+
+- **`n2n/__pycache__`**：跨 commit 切 `n2n/` 子树时一定要清掉 .pyc 缓存，
+  否则 import 时间戳错乱可能拉到错的 `model.py` 编译产物。
+
+- **GPUDataset**：trainer 默认开 `use_gpu_dataset=True`，整 140 帧 packed 都
+  放在 GPU 上（约 744 MB）。8 GB 卡也够用，4090 24 GB 完全无压力。
+
+- **torch.compile 首编译开销 ~30 s**：1 min benchmark 看到的 summary sps 会
+  被严重拉低，要看 epoch 行的稳态 sps；10 min 训练里 30 s 占比 5%，
+  summary sps 跟稳态差距可控。
+
+## 附录 A：本次对比的关键文件
+
+仓库内（持久）：
+
+| 文件 | 作用 |
+|---|---|
+| `docs/how_to_compare.md` | ← 本文 |
+| `n2n/trainer.py` | `Trainer` + `StepInfo` + `TrainConfig` |
+| `n2n/model.py` | main 版 UNet（残差 + max_pool + ConvTranspose2d） |
+| `n2n/infer.py` | `denoise_full_raw`（推理 + tile blend） |
+| `n2n/raw_utils.py` | `raw_to_display` / `gray_world_gains` 等 |
+| `n2n/dataset.py` | `find_raw_files` |
+
+每次新建（一次性，放 `/tmp` 即可）：
+
+| 文件 | 作用 |
+|---|---|
+| `/tmp/train_<A>.py` | 训练入口 A |
+| `/tmp/train_<B>.py` | 训练入口 B |
+| `/tmp/legacy_model.py` | 旧 commit 的 model.py 副本 |
+| `/tmp/gen_compare.py` | 推理 + 拼图 + HTML 模板 |
+
+产物（gitignore）：
+
+```
+checkpoints/<A>.pt
+checkpoints/<B>.pt
+result/compare.html + scenes/
+```

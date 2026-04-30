@@ -11,14 +11,14 @@ The locked-in production loss is::
   - ``TV`` is anisotropic total variation on the denoised output:
     ``mean(|∂x den|) + mean(|∂y den|)``.
 
-This is the single recipe the project settled on after the four
-experiment phases documented in ``docs/EXPERIMENTS_JOURNEY.md`` and
-the explicit time-budget sweep recorded in
-``docs/archived_recipes.txt``. Recipes that used to live in this
+This is the single recipe the project settled on after the experiment
+phases documented in ``docs/EXPERIMENTS_JOURNEY.md`` (stages 1-9 cover
+the loss / network / time-budget sweeps that led here; stage 10 covers
+the per-benchmark optimisation push). Recipes that used to live in this
 trainer (paper N2N consistency reg, VGG perceptual, multi-scale
-Charbonnier, Huber, …) are kept as text snapshots in
-``docs/archived_recipes.txt`` together with the commits to checkout
-if they need to be revived.
+Charbonnier, Huber, …) are kept as text snapshots in the appendix A of
+``EXPERIMENTS_JOURNEY.md`` together with the commits to checkout if they
+need to be revived.
 """
 from __future__ import annotations
 

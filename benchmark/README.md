@@ -167,7 +167,7 @@ python bench_scale.py result/<run> 0.0 --name verify_alpha0
 # stdout 末尾应该看到 全局平均 Δ +0.0000
 ```
 
-> 注意原本搬过来的 0.4-0.6 历史成绩 (见 `docs/how_to_run_benchmark.txt`
+> 注意原本搬过来的 0.4-0.6 历史成绩 (见 `docs/how_to_run_benchmark.md`
 > 第 6 节) 用的是 ysstereo 的旧 ISP, 跟当前评估不同管线, **不能直接横
 > 比**。重新跑一份新基线再开始评估。
 

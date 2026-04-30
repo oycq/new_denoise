@@ -15,11 +15,11 @@ L = L1(f(g₁), g₂)  +  0.01 · TV(f(g₁))
 - `g₁, g₂` 是 N2N 子采样
 - `TV(·)` 是去噪输出上的 anisotropic 总变差：`mean(|∂x den|) + mean(|∂y den|)`
 
-> 这是经过 5 个阶段实验 + 1 次 λ 扫描 + 1 次训练时长扫描后留下的**唯一**配方。
-> 完整历程见 [`docs/EXPERIMENTS_JOURNEY.md`](docs/EXPERIMENTS_JOURNEY.md)。
-> 之前主干里出现过的 paper N2N (L2 + γ·L_reg)、L1 + 0.05·VGG、multi-scale
-> Charbonnier、robust_trainer (EMA + R2R) 等方法的 recipe / 复活步骤都
-> 沉淀到 [`docs/archived_recipes.txt`](docs/archived_recipes.txt)。
+> 这是经过 5 个阶段实验 + 1 次 λ 扫描 + 1 次训练时长扫描后留下的**唯一**主干配方。
+> 完整历程见 [`docs/EXPERIMENTS_JOURNEY.md`](docs/EXPERIMENTS_JOURNEY.md)，
+> 其中**阶段 10** 是当前 benchmark 下的 30+ 候选 + ensemble 攻坚总结，
+> **附录 A** 是已废弃方法（paper N2N / L1+VGG / robust_trainer / MS-Charbonnier 等）
+> 的 recipe + git 复活路径。
 
 ## 0. 快速上手
 
@@ -98,7 +98,9 @@ intermediate_save_seconds = (300, 600)
 > **关于训练时长**：5 min 时 loss 已经落到 ~0.0162，10 min 几乎再无下降；
 > 但视觉上 10 min 在 ISO=16 暗区 / 角落 lens-shading 仍比 5 min 更干净，
 > 20 min 提升边际明显减少。10 min 是 cost / quality 甜点。
-> 详见 `docs/archived_recipes.txt` 第 5 节的 λ 扫描记录。
+> 详见 `docs/EXPERIMENTS_JOURNEY.md` 阶段 8 + 附录 A.6（λ 扫描历史）。
+> ⚠ 注意阶段 10（新对称-ISP benchmark）下"训得更长"边际趋零，5 min vs 10 min
+> 在 score 上看不出差异，跑次方差 0.05 量级；想压 score 主要靠 ensemble / TTA。
 
 ## 4. 关键实现要点
 
@@ -141,10 +143,10 @@ new_denoise/
 ├── train_gui.py                      # PyQt5 GUI 实现
 ├── speedtest.py                      # 1 分钟训练吞吐量测试（稳态 sps）
 ├── docs/
-│   ├── EXPERIMENTS_JOURNEY.md        # 整个项目的来龙去脉 + 经验
-│   ├── archived_recipes.txt          # 主干放弃过的方法（paper N2N / VGG / robust / 等）
-│   ├── how_to_compare.txt            # 怎么写一份对比 HTML 报告
-│   └── how_to_run_benchmark.txt      # 怎么把 ckpt 拿去 ysstereo 跑评估指标
+│   ├── EXPERIMENTS_JOURNEY.md        # 整个项目的来龙去脉 + 经验（含阶段 10 新 benchmark 攻坚 + 附录 A 配方复活索引）
+│   ├── how_to_compare.md             # 怎么写一份对比 HTML 报告
+│   ├── how_to_run_benchmark.md       # 怎么把 ckpt 拿去 benchmark 跑评估指标
+│   └── how_to_improve.md             # benchmark 优化任务说明（用户提需求的 spec）
 ├── export_l1tv_onnx.py               # 导出单通道 (1,1,H,W) ONNX 给 ysstereo
 ├── requirements.txt
 ├── README.md                         # （本文件）
